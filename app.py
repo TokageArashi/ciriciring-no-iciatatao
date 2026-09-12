@@ -148,7 +148,7 @@ def generate_tts_audio(text):
 
 # --- 5. AI 處理函數 ---
 def process_ai_input(text_prompt=None, audio_file=None):
-    # 1. 取得 API Key
+    # 1. 讀取 API Key
     api_key = None
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
@@ -162,18 +162,19 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    # 2. 定義 system_prompt 變數（確保名稱與下方 contents 引用的名稱一致）
+    # 2. 強制要求的系統 Prompt (包含具體例句要求)
     system_prompt = f"""{TAO_PHONOLOGY_PROMPT}
-請分析輸入內容並嚴格以 JSON 格式回應：
+請分析輸入內容，並嚴格以 JSON 格式回應。
+在 reference 欄位中，你必須「具體列出」至多 5 句與回應相關的達悟語羅馬字/中文對照例句及其出處來源：
+
 {{
   "user_recognized_tao": "若輸入為語音，請依達悟語音系將錄音中的達悟語話語精確轉寫為羅馬字；若輸入為文字，直接填入原文",
   "user_translation": "輸入內容的中文對照翻譯",
   "ai_reply_tao": "針對輸入內容回應的達悟語羅馬字句子",
-  "ai_reply_zh": "回應句子的中文翻譯"
-  "reference": "請列出至多 5 句參考資料出處（例如：[來源: tao_corpus.db 社群驗證語料 #ID] 或 [來源: 原住民族語數位典藏/語音分析]）"
+  "ai_reply_zh": "回應句子的中文翻譯",
+  "reference": "1. [達悟語例句 / 中文翻譯] - [來源出處名稱]\n2. [達悟語例句 / 中文翻譯] - [來源出處名稱]"
 }}"""
 
-    # 3. 帶入 contents
     contents = [system_prompt]
 
     if audio_file is not None:
