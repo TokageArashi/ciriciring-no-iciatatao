@@ -170,7 +170,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "輸入內容的中文對照翻譯",
   "ai_reply_tao": "針對輸入內容回應的達悟語羅馬字句子",
   "ai_reply_zh": "回應句子的中文翻譯"
-  "reference": "參考資料出處（例如：[來源: tao_corpus.db 社群驗證語料 #ID] 或 [來源: 原住民族語數位典藏/語音分析]）"
+  "reference": "請列出至多 5 句參考資料出處（例如：[來源: tao_corpus.db 社群驗證語料 #ID] 或 [來源: 原住民族語數位典藏/語音分析]）"
 }}"""
 
     # 3. 帶入 contents
@@ -310,12 +310,13 @@ if main_menu == "我要用AI":
                             st.session_state.active_bg = current_bg
 
         # 顯示 AI 產出結果與評估介面
+# 顯示 AI 產出結果與評估介面
         if "ai_data" in st.session_state and st.session_state.ai_data:
             ai_data = st.session_state.ai_data
             q_orig = st.session_state.get('active_q', '')
             bg_info = st.session_state.get("active_bg", current_bg)
             input_audio_saved = st.session_state.get("user_audio_path", None)
-
+            
             st.markdown("---")
             st.info(f"**【句子 1 - 輸入與辨識】**\n* 辨識/原文：{ai_data.get('user_recognized_tao', q_orig)}\n* 翻譯：{ai_data.get('user_translation', '')}")
             if input_audio_saved and os.path.exists(input_audio_saved):
@@ -323,6 +324,10 @@ if main_menu == "我要用AI":
                 st.audio(input_audio_saved)
 
             st.success(f"**【句子 2 - AI 對話回答】**\n* 達悟語：{ai_data.get('ai_reply_tao', '')}\n* 中文對照：{ai_data.get('ai_reply_zh', '')}")
+
+            # 💡 新增：顯示參考資料區塊
+            ref_info = ai_data.get('reference', '尚無標註參考來源')
+            st.warning(f"📚 **【語料參考資料出處】**\n{ref_info}")
 
             r_tts = generate_tts_audio(ai_data.get('ai_reply_tao', ''))
             if r_tts:
