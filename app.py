@@ -148,9 +148,15 @@ def generate_tts_audio(text):
 
 # --- 5. AI 處理函數 ---
 def process_ai_input(text_prompt=None, audio_file=None):
-    api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+    # 優先從 Streamlit Secrets 讀取，若無則讀取系統環境變數
+    api_key = None
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+    else:
+        api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+        
     if not api_key:
-        st.error("❌ 找不到 API Key，請設定環境變數 os.environ['GOOGLE_API_KEY']")
+        st.error("❌ 找不到 API Key，請在 Streamlit Cloud 的 Secrets 中設定 GOOGLE_API_KEY")
         return None
 
     genai.configure(api_key=api_key)
