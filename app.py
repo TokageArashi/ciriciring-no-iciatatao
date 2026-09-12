@@ -148,7 +148,7 @@ def generate_tts_audio(text):
 
 # --- 5. AI 處理函數 ---
 def process_ai_input(text_prompt=None, audio_file=None):
-    # 優先從 Streamlit Secrets 讀取，若無則讀取系統環境變數
+    # 1. 取得 API Key
     api_key = None
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
@@ -160,20 +160,19 @@ def process_ai_input(text_prompt=None, audio_file=None):
         return None
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3.6-flash')
+    model = genai.GenerativeModel(MODEL_NAME)
 
-    # 於 app.py 修改 system_instruction 格式
-    system_instruction = f"""{TAO_PHONOLOGY_PROMPT}
-     請分析使用者提供的文字或語音，並嚴格以 JSON 格式回應：
-     {{
-     "user_recognized_tao": "達悟語羅馬字轉寫或原文",
-     "user_translation": "中文翻譯",
-     "ai_reply_tao": "達悟語羅馬字回應",
-     "ai_reply_zh": "回應句子的中文翻譯",
-     "reference": "參考資料出處（例如：[來源: tao_corpus.db 社群驗證語料 #ID] 或 [來源: 原住民族語數位典藏/語音分析]）"
-     }}"""
+    # 2. 定義 system_prompt 變數（確保名稱與下方 contents 引用的名稱一致）
+    system_prompt = f"""{TAO_PHONOLOGY_PROMPT}
+請分析輸入內容並嚴格以 JSON 格式回應：
+{{
+  "user_recognized_tao": "若輸入為語音，請依達悟語音系將錄音中的達悟語話語精確轉寫為羅馬字；若輸入為文字，直接填入原文",
+  "user_translation": "輸入內容的中文對照翻譯",
+  "ai_reply_tao": "針對輸入內容回應的達悟語羅馬字句子",
+  "ai_reply_zh": "回應句子的中文翻譯"
+}}"""
 
-    # ✅ 前方保持 4 個空格，與上方 system_prompt 對齊
+    # 3. 帶入 contents
     contents = [system_prompt]
 
     if audio_file is not None:
