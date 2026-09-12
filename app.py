@@ -26,14 +26,14 @@ else:
     os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # --- 2. 設定與模型配置 ---
-st.set_page_config(page_title="ciriciring no iciatatao 眾語", page_icon="🏝️", layout="wide")
+st.set_page_config(page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide")
 MODEL_NAME = 'gemini-3.6-flash'
 
 TAO_PHONOLOGY_PROMPT = """
 你是一位精通達悟語（Tao / Yami）語言學與正詞法的專家。
 請依據達悟語的標準羅馬拼音系統與語音規則進行辨識：
 1. 元音（Vowels）：a, e (中元音 /ə/), i, o (或 u)。
-2. 子音（Consonants）：b, c (或 ch /tʃ/), d, g, h, k, m, n, ng, p, r, s, t, v, w, y, z, ' (聲門塞音)。
+2. 子音（Consonants）：b, c (/tɕ/), j (/dʒ/), d (/ɖ/), g, h (/ɰ/), k, m, n, ng (/ŋ/), p, r (ɻ), s (ʂ), t, v (f), w, y (j), z (r), ' (/ʔ/)。
 3. 請注意達悟語雙元音與雙子音特徵，輸出標準的達悟語羅馬字。
 """
 
@@ -240,9 +240,9 @@ with st.sidebar:
             new_u = st.text_input("設定帳號")
             new_p = st.text_input("設定密碼", type='password')
             new_e = st.text_input("信箱")
-            new_r = st.selectbox("預設部落：", ["椰油", "朗島", "東清", "野銀", "紅頭", "漁人", "其他"])
-            new_a = st.selectbox("預設年齡：", ["18-30", "31-40", "41-50", "51-60", "61歲及以上"])
-            new_g = st.selectbox("預設性別：", ["男", "女", "不公開"])
+            new_r = st.selectbox("部落：", ["椰油", "朗島", "東清", "野銀", "紅頭", "漁人", "巴丹", "台灣", "其他"])
+            new_a = st.selectbox("年齡：", ["學齡前", "國小", "國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81歲及以上"])
+            new_g = st.selectbox("性別：", ["男", "女", "不公開"])
             if st.button("註冊"):
                 if add_user(new_u, new_p, new_e, new_r, new_a, new_g):
                     st.success("註冊成功，請切換登入。")
@@ -264,15 +264,15 @@ if main_menu == "我要用AI":
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
     else:
         user = st.session_state.user_info
-        st.markdown("##### 📱 本次輸入者 / 長者背景設定")
-        r_list = ["椰油", "朗島", "東清", "野銀", "紅頭", "漁人", "其他"]
+        st.markdown("##### 📱 本次輸入者設定")
+        r_list = ["椰油", "朗島", "東清", "野銀", "紅頭", "漁人", "巴丹", "台灣", "其他"]
         a_list = ["學齡前", "國小", "國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81歲及以上"]
         g_list = ["男", "女", "不公開"]
 
         c1, c2, c3 = st.columns(3)
-        with c1: cur_r = st.selectbox("發話部落：", r_list, index=r_list.index(user['region']) if user['region'] in r_list else 0)
-        with c2: cur_a = st.selectbox("發話年齡：", a_list, index=a_list.index(user['age_group']) if user['age_group'] in a_list else 3)
-        with c3: cur_g = st.selectbox("發話性別：", g_list, index=g_list.index(user['gender']) if user['gender'] in g_list else 0)
+        with c1: cur_r = st.selectbox("部落：", r_list, index=r_list.index(user['region']) if user['region'] in r_list else 0)
+        with c2: cur_a = st.selectbox("年齡：", a_list, index=a_list.index(user['age_group']) if user['age_group'] in a_list else 3)
+        with c3: cur_g = st.selectbox("性別：", g_list, index=g_list.index(user['gender']) if user['gender'] in g_list else 0)
         current_bg = {"region": cur_r, "age_group": cur_a, "gender": cur_g}
 
         st.divider()
