@@ -149,31 +149,63 @@ def generate_tts_audio(text):
 # --- 5. AI 處理函數 ---
 def process_ai_input(text_prompt=None, audio_file=None):
     # 1. 讀取 API Key
-    api_key = None
-    if "GOOGLE_API_KEY" in st.secrets:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-    else:
-        api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
-        
+    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get('GOOGLE_API_KEY')
     if not api_key:
-        st.error("❌ 找不到 API Key，請在 Streamlit Cloud 的 Secrets 中設定 GOOGLE_API_KEY")
+        st.error("❌ 找不到 API Key，請檢查 Secrets 設定")
         return None
 
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    # 2. 強制要求的系統 Prompt (包含具體例句要求)
-    system_prompt = f"""{TAO_PHONOLOGY_PROMPT}
-請分析輸入內容，並嚴格以 JSON 格式回應。
-在 reference 欄位中，你必須「具體列出」至多 5 句與回應相關的達悟語羅馬字/中文對照例句及其出處來源：
+    # 2. 從 tao_corpus.db 提取合法語料 (FormosanBank 匯入資料 + 滿 15 人驗證資料)
+    legal_corpus = []
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        # 查詢條件：FormosanBank 初始資料 OR 滿 15 人驗證通過 (is_ready_for_ai = 1)
+        cursor.execute("""
+            SELECT id, q_original, q_trans, r_tao, r_zh, 
+                   CASE WHEN is_ready_for_ai = 1 THEN '社群驗證#15' ELSE 'FormosanBank' END as source_type
+            FROM feedback 
+            WHERE is_ready_for_ai = 1 OR q_original LIKE '%[FormosanBank]%' OR source = 'FormosanBank'
+            LIMIT 500
+        """)
+        rows = cursor.fetchall()
+        for r in rows:
+            legal_corpus.append(f"[{r[5]} ID #{r[0]}] 達悟語: {r[1]} | 中文: {r[2]} | 回應達悟語: {r[3]} | 回應中文: {r[4]}")
+        conn.close()
+    except Exception as e:
+        st.warning(f"⚠️ 載入內部資料庫時發生提示：{e}")
+
+    corpus_context = "\n".join(legal_corpus) if legal_corpus else "【警告：資料庫目前無可用合法語料】"
+
+    # 3. 超嚴格系統指令 Prompt
+    system_prompt = f"""
+【極度重要指令：禁止使用外部知識】
+你是一個封閉式達悟語（Yami/Tao）對話轉譯系統。
+你**絕不能**使用網路資料、現場自由生成拼法、或你預訓練模型中的任何外部知識。
+你**唯一**能使用的語料與單字庫如下所示：
+
+==== 唯一合法 tao_corpus.db 語料庫開始 ====
+{corpus_context}
+==== 唯一合法 tao_corpus.db 語料庫結束 ====
+
+【嚴格回答規範】：
+1. **單字限制**：你輸出的達悟語句子，只能使用上方【唯一合法語料庫】中出現過的字詞與單字。禁止自行創造可能的同音拼法。
+2. **新詞/未收錄字標註機制**：
+   * 若回應時「不得不使用」語料庫中未收錄的字，你必須將該字標記為【AI生成字】。
+   * 且必須在 reference 欄位詳細說明其「構詞語根組合」（例如：由哪些詞綴/詞幹組合）或「音譯來源」（例如：音譯自哪種語言的哪個原詞）。
+3. **回應格式**：請嚴格以 JSON 格式輸出：
 
 {{
-  "user_recognized_tao": "若輸入為語音，請依達悟語音系將錄音中的達悟語話語精確轉寫為羅馬字；若輸入為文字，直接填入原文",
-  "user_translation": "輸入內容的中文對照翻譯",
-  "ai_reply_tao": "針對輸入內容回應的達悟語羅馬字句子",
-  "ai_reply_zh": "回應句子的中文翻譯",
-  "reference": "1. [達悟語例句 / 中文翻譯] - [來源出處名稱]\n2. [達悟語例句 / 中文翻譯] - [來源出處名稱]"
-}}"""
+  "user_recognized_tao": "轉寫或對照之達悟語羅馬字（須符合語料庫）",
+  "user_translation": "中文對照翻譯",
+  "ai_reply_tao": "達悟語回應句子",
+  "ai_reply_zh": "回應之中文翻譯",
+  "reference": "1. [引用例句] - [來源: tao_corpus.db (FormosanBank 或 社群驗證#15 ID)]\n2. 【AI生成字說明】(若無使用新字則填寫「無 AI 生成字，全數引用自語料庫」)：單字 X [語根組合: aka- + -an] 或 [音譯自中文: 學校]"
+}}
+"""
 
     contents = [system_prompt]
 
@@ -183,7 +215,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
             audio_bytes = audio_file.read()
             mime_type = getattr(audio_file, 'type', 'audio/wav')
             contents.append({'mime_type': mime_type, 'data': audio_bytes})
-            contents.append("這是一段達悟語（Yami/Tao）的語音錄音，請將語音內容轉寫為達悟語羅馬字，並進行對話回應。")
+            contents.append("請對照【唯一合法語料庫】進行語音轉寫與回應，絕不使用庫外單字。")
         except Exception as e:
             st.error(f"讀取錄音檔失敗：{e}")
             return None
@@ -195,7 +227,10 @@ def process_ai_input(text_prompt=None, audio_file=None):
     try:
         response = model.generate_content(
             contents,
-            generation_config={"response_mime_type": "application/json"}
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0.0  # 設定為 0.0 降至最低隨機性，確保嚴格遵循語料庫
+            }
         )
         return json.loads(response.text)
     except Exception as e:
