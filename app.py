@@ -25,6 +25,24 @@ else:
     AUDIO_DIR = 'audio_files'
     os.makedirs(AUDIO_DIR, exist_ok=True)
 
+import sqlite3
+
+# 連接至您的資料庫檔案
+conn = sqlite3.connect('tao_corpus.db')
+cursor = conn.cursor()
+
+# 執行 SQL 語句，將所有未標註來源的欄位補上 'FormosanBank'
+cursor.execute("""
+    UPDATE corpus 
+    SET source = 'FormosanBank' 
+    WHERE source IS NULL OR source = '';
+""")
+
+# 儲存變更並關閉連線
+conn.commit()
+print(f"已成功更新 {cursor.rowcount} 筆資料的來源標記！")
+conn.close()
+
 # --- 2. 設定與模型配置 ---
 st.set_page_config(page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide")
 MODEL_NAME = 'gemini-3.6-flash'
