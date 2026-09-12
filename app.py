@@ -170,6 +170,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "輸入內容的中文對照翻譯",
   "ai_reply_tao": "針對輸入內容回應的達悟語羅馬字句子",
   "ai_reply_zh": "回應句子的中文翻譯"
+  "reference": "參考資料出處（例如：[來源: tao_corpus.db 社群驗證語料 #ID] 或 [來源: 原住民族語數位典藏/語音分析]）"
 }}"""
 
     # 3. 帶入 contents
