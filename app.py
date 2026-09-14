@@ -9,7 +9,158 @@ import time
 import datetime
 import hashlib
 import uuid
+import io
+import json
+import os
+import sqlite3
+import streamlit as st
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
+# --- 1. Google Drive API 連線機制 ---
+FOLDER_ID = st.secrets.get("FOLDER_ID", "")
+
+
+def get_drive_service():
+  """透過 Service Account 取得 Google Drive 服務"""
+  creds_dict = dict(st.secrets["gcp_service_account"])
+  creds = service_account.Credentials.from_service_account_info(
+      creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
+  )
+  return build("drive", "v3", credentials=creds)
+
+
+def upload_to_gdrive(file_data, file_name, mime_type="audio/wav"):
+  """將語音檔或資料庫上傳/更新至 Google Drive"""
+  try:
+    service = get_drive_service()
+
+    # 檢查是否已存在同名檔案
+    query = f"name = '{file_name}' and '{FOLDER_ID}' in parents and trashed = false"
+    results = (
+        service.files().list(q=query, fields="files(id, name)").execute()
+    )
+    items = results.get("files", [])
+
+    if isinstance(file_data, str) and os.path.exists(file_data):
+      media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
+    elif isinstance(file_data, bytes):
+      media = MediaIoBaseUpload(
+          io.BytesIO(file_data), mimetype=mime_type, resumable=True
+      )
+    else:
+      return None
+
+    if items:
+      # 覆蓋已存在的檔案（例如 DB 資料庫檔）
+      file_id = items[0]["id"]
+      updated_file = (
+          service.files()
+          .update(fileId=file_id, media_body=media)
+          .execute()
+      )
+      return updated_file.get("id")
+    else:
+      # 新增新檔案（例如 語音檔）
+      file_metadata = {"name": file_name, "parents": [FOLDER_ID]}
+      uploaded_file = (
+          service.files()
+          .create(body=file_metadata, media_body=media, fields="id")
+          .execute()
+      )
+      return uploaded_file.get("id")
+  except Exception as e:
+    st.error(f"Google Drive 上傳失敗：{e}")
+    return None
+
+
+# --- 2. 替換持久化儲存邏輯 ---
+DB_NAME = "tao_corpus.db"
+
+
+def sync_db_to_gdrive():
+  """確保每次修改本地 SQLite 後，將最新 sqlite 檔回存雲端硬碟"""
+  upload_to_gdrive(DB_NAME, "tao_corpus.db", "application/x-sqlite3")
+
+
+def save_audio_bytes_permanently(audio_bytes, suffix=".wav"):
+  """將語音二進位檔案寫入本地暫存並自動同步至 Google Drive"""
+  if not audio_bytes:
+    return None
+  try:
+    file_name = f"audio_{uuid.uuid4().hex[:10]}{suffix}"
+
+    # 取得 Bytes
+    if hasattr(audio_bytes, "read"):
+      audio_bytes.seek(0)
+      raw_bytes = audio_bytes.read()
+    else:
+      raw_bytes = audio_bytes
+
+    # 上傳至 Google Drive
+    drive_file_id = upload_to_gdrive(
+        raw_bytes, file_name, mime_type="audio/wav"
+    )
+
+    # 同時保留本地臨時檔案供當次播放
+    os.makedirs("audio_files", exist_ok=True)
+    local_path = os.path.join("audio_files", file_name)
+    with open(local_path, "wb") as f:
+      f.write(raw_bytes)
+
+    return local_path
+  except Exception as e:
+    st.error(f"儲存語音檔失敗: {e}")
+    return None
+
+
+def save_語料_to_db(
+    user_info,
+    bg_info,
+    q_orig,
+    q_trans,
+    q_audio,
+    r_tao,
+    r_zh,
+    r_audio,
+    is_edited=False,
+    is_error=False,
+):
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  err_cnt = 1 if is_error else 0
+  edited_flag = 1 if is_edited else 0
+
+  cursor.execute(
+      """
+        INSERT INTO feedback (user_id, user_email, region, age_group, gender, q_original, q_trans, q_audio_path, r_tao, r_zh, r_audio_path, is_edited, error_count, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+      (
+          user_info["username"],
+          user_info["email"],
+          bg_info["region"],
+          bg_info["age_group"],
+          bg_info["gender"],
+          q_orig,
+          q_trans,
+          q_audio,
+          r_tao,
+          r_zh,
+          r_audio,
+          edited_flag,
+          err_cnt,
+          datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+      ),
+  )
+
+  conn.commit()
+  conn.close()
+
+  # 同步資料庫備份至 Google Drive
+  sync_db_to_gdrive()
+    
 # --- 1. Google Drive 永久目錄設定 ---
 DRIVE_DIR = '/content/drive/MyDrive/tao_corpus_data'
 AUDIO_DIR = os.path.join(DRIVE_DIR, 'audio_files')
