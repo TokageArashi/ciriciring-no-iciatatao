@@ -100,59 +100,68 @@ def get_or_create_target_folder():
 FOLDER_ID = get_or_create_target_folder()
 
 
-def upload_to_gdrive(file_data, file_name, mime_type="application/octet-stream"):
-  """上傳檔案或二進位資料至指定 Google Drive 資料夾"""
-  if not FOLDER_ID:
-    st.error("❌ 無法上傳：缺少 FOLDER_ID")
-    return None
+def upload_to_gdrive(file_data, file_name, mime_type='application/octet-stream'):
+    """上傳檔案或二進位資料至指定 Google Drive 資料夾"""
+    if not FOLDER_ID:
+        st.error("❌ 無法上傳：缺少 FOLDER_ID，請先在 secrets.toml 中設定")
+        return None
 
-  service = get_drive_service()
-  file_metadata = {"name": file_name, "parents": [FOLDER_ID]}
+    service = get_drive_service()
+    
+    # 上傳檔案的元資料 (指定父資料夾)
+    file_metadata = {
+        'name': file_name,
+        'parents': [FOLDER_ID]
+    }
 
-  if isinstance(file_data, str) and os.path.exists(file_data):
-    media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
-  elif isinstance(file_data, bytes):
-    media = MediaIoBaseUpload(
-        io.BytesIO(file_data), mimetype=mime_type, resumable=True
-    )
-  else:
-    st.error("❌ 上傳失敗：不支援的資料類型")
-    return None
-
-  try:
-    query = (
-        f"'{FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
-    )
-    results = service.files().list(q=query, fields="files(id)").execute()
-    existing_files = results.get("files", [])
-
-    if existing_files:
-      file_id = existing_files[0]["id"]
-      file = (
-          service.files()
-          .update(
-              fileId=file_id,
-              media_body=media,
-              fields="id",
-              supportsAllDrives=True,
-          )
-          .execute()
-      )
+    # 判斷 file_data 為檔案路徑還是二進位資料
+    if isinstance(file_data, str) and os.path.exists(file_data):
+        media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
+    elif isinstance(file_data, bytes):
+        media = MediaIoBaseUpload(io.BytesIO(file_data), mimetype=mime_type, resumable=True)
     else:
-      file = (
-          service.files()
-          .create(
-              body=file_metadata,
-              media_body=media,
-              fields="id",
-              supportsAllDrives=True,
-          )
-          .execute()
-      )
-    return file.get("id")
-  except Exception as e:
-    st.error(f"❌ 雲端硬碟同步失敗 ({file_name}): {e}")
-    return None
+        st.error("❌ 上傳失敗：不支援的資料類型")
+        return None
+
+    try:
+        # 尋找資料夾內是否已有同名檔案，有則更新，無則建立
+        query = f"'{FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        existing_files = results.get('files', [])
+
+        if existing_files:
+            file_id = existing_files[0]['id']
+            file = service.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+        else:
+            file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+            
+            # 【關鍵修復】：將建立的檔案權限新增給個人 Gmail
+            if ADMIN_EMAIL:
+                permission = {
+                    'type': 'user',
+                    'role': 'writer',
+                    'emailAddress': ADMIN_EMAIL
+                }
+                service.permissions().create(
+                    fileId=file.get('id'), 
+                    body=permission,
+                    sendNotificationEmail=False
+                ).execute()
+
+        return file.get('id')
+    except Exception as e:
+        st.error(f"❌ 雲端硬碟同步失敗 ({file_name}): {e}")
+        return None
 
 
 def sync_db_to_gdrive():
