@@ -46,10 +46,11 @@ st.markdown(
 )
 
 
-# --- 2. Google Drive API 連線與備份機制 ---
-# --- 1. Google Drive API 連線機制 ---
+# --- Google Drive API 自動建立/取得資料夾機制 ---
+ADMIN_EMAIL = "kymco3903@gmail.com"  # 填入您的個人 Gmail 信箱
+
+
 def get_drive_service():
-  """透過 Service Account 取得 Google Drive 服務"""
   creds_dict = dict(st.secrets["gcp_service_account"])
   creds = service_account.Credentials.from_service_account_info(
       creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
@@ -57,70 +58,49 @@ def get_drive_service():
   return build("drive", "v3", credentials=creds)
 
 
-def upload_to_gdrive(file_data, file_name, mime_type="audio/wav"):
-  """將語音檔或資料庫上傳/更新至 Google Drive"""
-  try:
-    service = get_drive_service()
+def get_or_create_target_folder():
+  """若 secrets 沒填 FOLDER_ID，則由 Service Account 自動建立並共用給管理員"""
+  folder_id = st.secrets.get("FOLDER_ID", "")
+  if folder_id:
+    return folder_id
 
-    # 搜尋是否已存在同名檔案
-    query = (
-        f"name = '{file_name}' and '{FOLDER_ID}' in parents and trashed = false"
+  service = get_drive_service()
+  # 搜尋是否已經建立過
+  query = (
+      "name = 'Tao_Corpus_Data' and mimeType ="
+      " 'application/vnd.google-apps.folder' and trashed = false"
+  )
+  results = service.files().list(q=query, fields="files(id)").execute()
+  items = results.get("files", [])
+
+  if items:
+    return items[0]["id"]
+  else:
+    # 自動建立新資料夾
+    file_metadata = {
+        "name": "Tao_Corpus_Data",
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    folder = (
+        service.files().create(body=file_metadata, fields="id").execute()
     )
-    results = (
-        service.files()
-        .list(
-            q=query,
-            fields="files(id, name)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        )
-        .execute()
-    )
-    items = results.get("files", [])
+    new_id = folder.get("id")
 
-    if isinstance(file_data, str) and os.path.exists(file_data):
-      media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
-    elif isinstance(file_data, bytes):
-      media = MediaIoBaseUpload(
-          io.BytesIO(file_data), mimetype=mime_type, resumable=True
-      )
-    else:
-      return None
-
-    if items:
-      # 更新已存在的檔案
-      file_id = items[0]["id"]
-      updated_file = (
-          service.files()
-          .update(
-              fileId=file_id,
-              media_body=media,
-              supportsAllDrives=True,
-          )
-          .execute()
-      )
-      return updated_file.get("id")
-    else:
-      # 新增檔案：明確包含 parents 並開啟 supportsAllDrives
-      file_metadata = {
-          "name": file_name,
-          "parents": [FOLDER_ID],
+    # 共用給個人 Gmail
+    if ADMIN_EMAIL:
+      permission = {
+          "type": "user",
+          "role": "writer",
+          "emailAddress": ADMIN_EMAIL,
       }
-      uploaded_file = (
-          service.files()
-          .create(
-              body=file_metadata,
-              media_body=media,
-              fields="id",
-              supportsAllDrives=True,
-              ignoreDefaultVisibility=True,
-          )
-          .execute()
-      )
-      return uploaded_file.get("id")
-  except Exception as e:
-    st.error(f"Google Drive 上傳失敗：{e}")
-    return None
+      service.permissions().create(fileId=new_id, body=permission).execute()
+
+    return new_id
+
+
+# 全域取得資料夾 ID
+FOLDER_ID = get_or_create_target_folder()
+
 
     if items:
       file_id = items[0]["id"]
