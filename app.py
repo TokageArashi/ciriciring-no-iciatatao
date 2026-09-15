@@ -7,18 +7,18 @@ import sqlite3
 import time
 import uuid
 
+import google.generativeai as genai
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
-import google.generativeai as genai
 from gtts import gTTS
 import pandas as pd
 import streamlit as st
 
 # --- 1. 常數與全域設定 ---
 DB_NAME = "tao_corpus.db"
-MODEL_NAME = "gemini-3.6-flash"
-FOLDER_ID = st.secrets.get("FOLDER_ID", "")
+MODEL_NAME = "gemini-1.5-flash"  # 建議使用標準模型名稱
+ADMIN_EMAIL = "kymco3903@gmail.com"  # 填入您的個人 Gmail 信箱
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -46,10 +46,7 @@ st.markdown(
 )
 
 
-# --- Google Drive API 自動建立/取得資料夾機制 ---
-ADMIN_EMAIL = "kymco3903@gmail.com"  # 填入您的個人 Gmail 信箱
-
-
+# --- 2. Google Drive API 自動建立/取得資料夾機制 ---
 def get_drive_service():
   creds_dict = dict(st.secrets["gcp_service_account"])
   creds = service_account.Credentials.from_service_account_info(
@@ -64,42 +61,98 @@ def get_or_create_target_folder():
   if folder_id:
     return folder_id
 
-  service = get_drive_service()
-  # 搜尋是否已經建立過
-  query = (
-      "name = 'Tao_Corpus_Data' and mimeType ="
-      " 'application/vnd.google-apps.folder' and trashed = false"
-  )
-  results = service.files().list(q=query, fields="files(id)").execute()
-  items = results.get("files", [])
-
-  if items:
-    return items[0]["id"]
-  else:
-    # 自動建立新資料夾
-    file_metadata = {
-        "name": "Tao_Corpus_Data",
-        "mimeType": "application/vnd.google-apps.folder",
-    }
-    folder = (
-        service.files().create(body=file_metadata, fields="id").execute()
+  try:
+    service = get_drive_service()
+    query = (
+        "name = 'Tao_Corpus_Data' and mimeType ="
+        " 'application/vnd.google-apps.folder' and trashed = false"
     )
-    new_id = folder.get("id")
+    results = service.files().list(q=query, fields="files(id)").execute()
+    items = results.get("files", [])
 
-    # 共用給個人 Gmail
-    if ADMIN_EMAIL:
-      permission = {
-          "type": "user",
-          "role": "writer",
-          "emailAddress": ADMIN_EMAIL,
+    if items:
+      return items[0]["id"]
+    else:
+      file_metadata = {
+          "name": "Tao_Corpus_Data",
+          "mimeType": "application/vnd.google-apps.folder",
       }
-      service.permissions().create(fileId=new_id, body=permission).execute()
+      folder = (
+          service.files().create(body=file_metadata, fields="id").execute()
+      )
+      new_id = folder.get("id")
 
-    return new_id
+      if ADMIN_EMAIL:
+        permission = {
+            "type": "user",
+            "role": "writer",
+            "emailAddress": ADMIN_EMAIL,
+        }
+        service.permissions().create(fileId=new_id, body=permission).execute()
+
+      return new_id
+  except Exception as e:
+    st.error(f"⚠️ Google Drive 自動取得資料夾失敗: {e}")
+    return ""
 
 
 # 全域取得資料夾 ID
 FOLDER_ID = get_or_create_target_folder()
+
+
+def upload_to_gdrive(file_data, file_name, mime_type="application/octet-stream"):
+  """上傳檔案或二進位資料至指定 Google Drive 資料夾"""
+  if not FOLDER_ID:
+    st.error("❌ 無法上傳：缺少 FOLDER_ID")
+    return None
+
+  service = get_drive_service()
+  file_metadata = {"name": file_name, "parents": [FOLDER_ID]}
+
+  if isinstance(file_data, str) and os.path.exists(file_data):
+    media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
+  elif isinstance(file_data, bytes):
+    media = MediaIoBaseUpload(
+        io.BytesIO(file_data), mimetype=mime_type, resumable=True
+    )
+  else:
+    st.error("❌ 上傳失敗：不支援的資料類型")
+    return None
+
+  try:
+    query = (
+        f"'{FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
+    )
+    results = service.files().list(q=query, fields="files(id)").execute()
+    existing_files = results.get("files", [])
+
+    if existing_files:
+      file_id = existing_files[0]["id"]
+      file = (
+          service.files()
+          .update(
+              fileId=file_id,
+              media_body=media,
+              fields="id",
+              supportsAllDrives=True,
+          )
+          .execute()
+      )
+    else:
+      file = (
+          service.files()
+          .create(
+              body=file_metadata,
+              media_body=media,
+              fields="id",
+              supportsAllDrives=True,
+          )
+          .execute()
+      )
+    return file.get("id")
+  except Exception as e:
+    st.error(f"❌ 雲端硬碟同步失敗 ({file_name}): {e}")
+    return None
 
 
 def sync_db_to_gdrive():
@@ -289,56 +342,6 @@ def save_語料_to_db(
 
   conn.commit()
   conn.close()
-
-
-def upload_to_gdrive(file_data, file_name, mime_type='application/octet-stream'):
-    """上傳檔案或二進位資料至指定 Google Drive 資料夾"""
-    if not FOLDER_ID:
-        st.error("❌ 無法上傳：缺少 FOLDER_ID")
-        return None
-
-    service = get_drive_service()
-    file_metadata = {
-        'name': file_name,
-        'parents': [FOLDER_ID]
-    }
-
-    # 判斷 file_data 為檔案路徑還是二進位資料
-    if isinstance(file_data, str) and os.path.exists(file_data):
-        media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
-    elif isinstance(file_data, bytes):
-        media = MediaIoBaseUpload(io.BytesIO(file_data), mimetype=mime_type, resumable=True)
-    else:
-        st.error("❌ 上傳失敗：不支援的資料類型")
-        return None
-
-    try:
-        # 尋找資料夾內是否已有同名檔案，有則更新，無則建立
-        query = f"'{FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
-        results = service.files().list(q=query, fields="files(id)").execute()
-        existing_files = results.get('files', [])
-
-        if existing_files:
-            file_id = existing_files[0]['id']
-            file = service.files().update(
-                fileId=file_id,
-                media_body=media,
-                fields='id',
-                supportsAllDrives=True
-            ).execute()
-        else:
-            file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id',
-                supportsAllDrives=True
-            ).execute()
-        return file.get('id')
-    except Exception as e:
-        st.error(f"❌ 雲端硬碟同步失敗 ({file_name}): {e}")
-        return None
-
-
   sync_db_to_gdrive()
 
 
@@ -360,7 +363,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
             SELECT id, q_original, q_trans, r_tao, r_zh, 
                    CASE WHEN is_ready_for_ai = 1 THEN '社群驗證#15' ELSE 'FormosanBank' END as source_type
             FROM feedback 
-            WHERE is_ready_for_ai = 1 OR q_original LIKE '%[FormosanBank]%' OR source = 'FormosanBank'
+            WHERE is_ready_for_ai = 1 OR q_original LIKE '%[FormosanBank]%'
             LIMIT 500
         """)
     rows = cursor.fetchall()
@@ -547,9 +550,11 @@ if main_menu == "我要用AI":
       cur_a = st.selectbox(
           "年齡：",
           a_list,
-          index=a_list.index(user["age_group"])
-          if user["age_group"] in a_list
-          else 3,
+          index=(
+              a_list.index(user["age_group"])
+              if user["age_group"] in a_list
+              else 3
+          ),
       )
     with c3:
       cur_g = st.selectbox(
@@ -568,9 +573,7 @@ if main_menu == "我要用AI":
     )
 
     if input_type == "🎤 達悟語語音輸入":
-      st.caption(
-          "請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識："
-      )
+      st.caption("請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識：")
       voice_input = st.audio_input(
           "點擊麥克風開始錄音", key="voice_input_main"
       )
@@ -738,7 +741,9 @@ if main_menu == "我要用AI":
               is_edited=True,
               is_error=False,
           )
-          st.success("🎉 修正版文字與覆蓋語音檔已順利儲存至 Google Drive！")
+          st.success(
+              "🎉 修正版文字與覆蓋語音檔已順利儲存至 Google Drive！"
+          )
           del st.session_state.ai_data
 
 elif main_menu == "看別人用AI":
