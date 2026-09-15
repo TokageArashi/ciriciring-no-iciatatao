@@ -102,32 +102,6 @@ def get_or_create_target_folder():
 FOLDER_ID = get_or_create_target_folder()
 
 
-    if items:
-      file_id = items[0]["id"]
-      updated_file = (
-          service.files()
-          .update(fileId=file_id, media_body=media, supportsAllDrives=True)
-          .execute()
-      )
-      return updated_file.get("id")
-    else:
-      file_metadata = {"name": file_name, "parents": [FOLDER_ID]}
-      uploaded_file = (
-          service.files()
-          .create(
-              body=file_metadata,
-              media_body=media,
-              fields="id",
-              supportsAllDrives=True,
-          )
-          .execute()
-      )
-      return uploaded_file.get("id")
-  except Exception as e:
-    st.error(f"Google Drive 上傳失敗：{e}")
-    return None
-
-
 def sync_db_to_gdrive():
   """將最新 sqlite 檔同步至 Google Drive"""
   upload_to_gdrive(DB_NAME, "tao_corpus.db", "application/x-sqlite3")
