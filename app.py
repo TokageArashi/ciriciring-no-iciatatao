@@ -60,9 +60,9 @@ def get_drive_service():
 def upload_to_gdrive(file_data, file_name, mime_type="audio/wav"):
   """將語音檔或資料庫上傳/更新至 Google Drive"""
   try:
-    # 這裡會呼叫上方定義好的 get_drive_service()
     service = get_drive_service()
 
+    # 搜尋是否已存在同名檔案
     query = (
         f"name = '{file_name}' and '{FOLDER_ID}' in parents and trashed = false"
     )
@@ -86,6 +86,41 @@ def upload_to_gdrive(file_data, file_name, mime_type="audio/wav"):
       )
     else:
       return None
+
+    if items:
+      # 更新已存在的檔案
+      file_id = items[0]["id"]
+      updated_file = (
+          service.files()
+          .update(
+              fileId=file_id,
+              media_body=media,
+              supportsAllDrives=True,
+          )
+          .execute()
+      )
+      return updated_file.get("id")
+    else:
+      # 新增檔案：明確包含 parents 並開啟 supportsAllDrives
+      file_metadata = {
+          "name": file_name,
+          "parents": [FOLDER_ID],
+      }
+      uploaded_file = (
+          service.files()
+          .create(
+              body=file_metadata,
+              media_body=media,
+              fields="id",
+              supportsAllDrives=True,
+              ignoreDefaultVisibility=True,
+          )
+          .execute()
+      )
+      return uploaded_file.get("id")
+  except Exception as e:
+    st.error(f"Google Drive 上傳失敗：{e}")
+    return None
 
     if items:
       file_id = items[0]["id"]
