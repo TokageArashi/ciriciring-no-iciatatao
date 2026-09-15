@@ -337,7 +337,8 @@ def upload_to_gdrive(file_data, file_name, mime_type='application/octet-stream')
     except Exception as e:
         st.error(f"❌ 雲端硬碟同步失敗 ({file_name}): {e}")
         return None
-        
+
+
   sync_db_to_gdrive()
 
 
