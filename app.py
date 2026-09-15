@@ -17,7 +17,7 @@ import streamlit as st
 
 # --- 1. 常數與全域設定 ---
 DB_NAME = "tao_corpus.db"
-MODEL_NAME = "gemini-1.5-flash"  # 建議使用標準模型名稱
+MODEL_NAME = "gemini-3.6-flash"  # 建議使用標準模型名稱
 ADMIN_EMAIL = "kymco3903@gmail.com"  # 填入您的個人 Gmail 信箱
 
 st.set_page_config(
