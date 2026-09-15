@@ -47,23 +47,25 @@ st.markdown(
 
 
 # --- 2. Google Drive API 連線與備份機制 ---
-def get_drive_service():
-  """透過 Service Account 取得 Google Drive 服務"""
-  creds_dict = dict(st.secrets["gcp_service_account"])
-  creds = service_account.Credentials.from_service_account_info(
-      creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
-  )
-  return build("drive", "v3", credentials=creds)
-
-
 def upload_to_gdrive(file_data, file_name, mime_type="audio/wav"):
   """將語音檔或資料庫上傳/更新至 Google Drive"""
   try:
     service = get_drive_service()
+
+    # 檢查是否已存在同名檔案
     query = (
         f"name = '{file_name}' and '{FOLDER_ID}' in parents and trashed = false"
     )
-    results = service.files().list(q=query, fields="files(id, name)").execute()
+    results = (
+        service.files()
+        .list(
+            q=query,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
     items = results.get("files", [])
 
     if isinstance(file_data, str) and os.path.exists(file_data):
@@ -76,18 +78,25 @@ def upload_to_gdrive(file_data, file_name, mime_type="audio/wav"):
       return None
 
     if items:
+      # 覆蓋已存在的檔案
       file_id = items[0]["id"]
       updated_file = (
           service.files()
-          .update(fileId=file_id, media_body=media)
+          .update(fileId=file_id, media_body=media, supportsAllDrives=True)
           .execute()
       )
       return updated_file.get("id")
     else:
+      # 新增新檔案
       file_metadata = {"name": file_name, "parents": [FOLDER_ID]}
       uploaded_file = (
           service.files()
-          .create(body=file_metadata, media_body=media, fields="id")
+          .create(
+              body=file_metadata,
+              media_body=media,
+              fields="id",
+              supportsAllDrives=True,  # 允許寫入共用資料夾/共用雲端硬碟
+          )
           .execute()
       )
       return uploaded_file.get("id")
