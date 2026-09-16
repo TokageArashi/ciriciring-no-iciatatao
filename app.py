@@ -12,7 +12,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-3.6-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
