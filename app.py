@@ -159,7 +159,40 @@ def login_user(username, password):
   return data
 
 
-# --- 4. 語音處理輔助函數 (直接處理 Bytes) ---
+# --- 4. 刪除語料資料 (權限驗證與資料連帶刪除) ---
+def delete_feedback_item(feedback_id, current_username):
+  """刪除特定一筆 feedback 資料，並連帶刪除關聯的投票紀錄"""
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  # 查驗資料擁有者
+  cursor.execute(
+      "SELECT user_id FROM feedback WHERE id = ?", (feedback_id,)
+  )
+  row = cursor.fetchone()
+
+  if not row:
+    conn.close()
+    return False, "找不到該筆資料。"
+
+  owner_id = row[0]
+
+  # 權限檢查：只有原作者或 admin 可以刪除
+  if current_username != "admin" and owner_id != current_username:
+    conn.close()
+    return False, "權限不足：您只能刪除自己提供的資料！"
+
+  # 執行刪除 (同步清理投票紀錄)
+  cursor.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,))
+  cursor.execute(
+      "DELETE FROM community_votes WHERE feedback_id = ?", (feedback_id,)
+  )
+  conn.commit()
+  conn.close()
+  return True, "刪除成功！"
+
+
+# --- 5. 語音處理輔助函數 (直接處理 Bytes) ---
 def get_bytes_from_input(audio_input):
   """將 Streamlit 輸入的語音轉換為 raw bytes"""
   if not audio_input:
@@ -237,7 +270,7 @@ def save_語料_to_db(
   conn.close()
 
 
-# --- 5. AI 處理邏輯 ---
+# --- 6. AI 處理邏輯 ---
 def process_ai_input(text_prompt=None, audio_file=None):
   api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
   if not api_key:
@@ -332,7 +365,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     return None
 
 
-# --- 6. 側邊欄：登入與註冊 ---
+# --- 7. 側邊欄：登入與註冊 ---
 if "user_info" not in st.session_state:
   st.session_state.user_info = None
 
@@ -393,7 +426,7 @@ with st.sidebar:
       st.session_state.user_info = None
       st.rerun()
 
-# --- 7. 主頁面區塊 ---
+# --- 8. 主頁面區塊 ---
 main_menu = st.radio(
     "", ["我要用AI", "看別人用AI", "關於本站"], horizontal=True
 )
@@ -676,14 +709,15 @@ elif main_menu == "看別人用AI":
   if not rows:
     st.info("目前尚無對話語料。")
   else:
-    current_voter = (
+    current_username = (
         st.session_state.user_info["username"]
         if st.session_state.user_info
-        else "guest"
+        else None
     )
 
     for row in rows:
       f_id = row[0]
+      owner_id = row[1]
       region = row[2]
       is_edited = row[3]
       error_count = row[4]
@@ -704,7 +738,7 @@ elif main_menu == "看別人用AI":
       )
 
       with st.expander(
-          f"💬 對話 #{f_id} | 來源部落：{region} | 狀態：{status_tag}"
+          f"💬 對話 #{f_id} | 上傳者：{owner_id or '匿名'} | 部落：{region} | 狀態：{status_tag}"
       ):
         st.markdown("**【句子 1 - 輸入與翻譯】**")
         st.write(f"1. 達悟語：{q_original}")
@@ -720,12 +754,23 @@ elif main_menu == "看別人用AI":
 
         st.divider()
 
+        # --- 刪除資料區塊 (僅原作者或 admin 可見) ---
+        if current_username and (current_username == owner_id or current_username == "admin"):
+            if st.button(f"🗑️ 刪除此筆資料 (ID #{f_id})", key=f"del_{f_id}"):
+                success, msg = delete_feedback_item(f_id, current_username)
+                if success:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+            st.divider()
+
         conn = sqlite3.connect(DB_NAME)
         v_check = pd.read_sql_query(
             "SELECT * FROM community_votes WHERE feedback_id = ? AND voter_id"
             " = ?",
             conn,
-            params=(f_id, current_voter),
+            params=(f_id, current_username or "guest"),
         )
         all_votes = pd.read_sql_query(
             "SELECT * FROM community_votes WHERE feedback_id = ?",
