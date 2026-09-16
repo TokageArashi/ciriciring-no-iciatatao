@@ -154,7 +154,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-legal_corpus = []
+    legal_corpus = []
     
     # 1. 從 Supabase 讀取基礎語料庫 (corpus 表)
     try:
