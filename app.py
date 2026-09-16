@@ -12,7 +12,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-1.5-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -196,7 +196,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "引用之語料 ID 或單字來源"
+  "reference": "詳細說明引用的語料 ID、單字來源、拆解邏輯或造字標註"
 }}
 """
 
@@ -312,7 +312,6 @@ if main_menu == "我要用AI":
                         ai_data = process_ai_input(audio_file=voice_input)
 
                         if ai_data:
-                            # 為 AI 回應產生 TTS 音檔
                             r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
                             st.session_state.active_q = ai_data.get("user_recognized_tao", "語音輸入")
                             st.session_state.ai_data = ai_data
@@ -331,7 +330,6 @@ if main_menu == "我要用AI":
                     with st.spinner("⏳ AI 思考中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
                         if ai_data:
-                            # 為 AI 回應產生 TTS 音檔
                             r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
                             st.session_state.active_q = text_input
                             st.session_state.ai_data = ai_data
@@ -356,9 +354,13 @@ if main_menu == "我要用AI":
             st.success(
                 f"**【句子 2 - AI 對話回答】**\n* 達悟語：{ai_data.get('ai_reply_tao', '')}\n* 中文對照：{ai_data.get('ai_reply_zh', '')}"
             )
-            # 播放 AI 生成的回答語音
             if st.session_state.get("ai_audio_bytes"):
                 st.audio(st.session_state.ai_audio_bytes, format="audio/mp3")
+
+            # 💡 顯式呈現 AI 參考資料 / 語料來源
+            st.warning(
+                f"**【📚 參考資料 / 語料來源】**\n* {ai_data.get('reference', '未提供參考資料')}"
+            )
 
             st.divider()
             st.subheader("📝 語料品質評估")
@@ -379,7 +381,7 @@ if main_menu == "我要用AI":
                         st.rerun()
 
             elif eval_choice == "錯誤":
-                st.warning("⚠️ 發現錯誤。您可以修正文字，並重新錄製/上傳語音檔：")
+                st.warning("⚠️ 發現錯誤。您可以修正文字、語音與參考資料來源：")
                 
                 # 1. 修正問題 (句子 1)
                 st.markdown("##### ✏️ 修正【句子 1 - 問題】")
@@ -397,8 +399,10 @@ if main_menu == "我要用AI":
                 r_audio_rec = st.audio_input("🎤 重新錄製【回應語音】（選擇性）：", key="edit_r_rec")
                 r_audio_file = st.file_uploader("📁 上傳【回應語音檔】（選擇性）：", type=["wav", "mp3", "m4a"], key="edit_r_file")
 
+                # 3. 修正參考資料
+                e_ref = st.text_input("修改【參考資料 / 語料來源】：", value=ai_data.get("reference", ""))
+
                 if st.button("💾 儲存修正版至 Supabase"):
-                    # 處理提問語音覆蓋邏輯
                     final_q_bytes = st.session_state.get("user_audio_bytes")
                     final_q_mime = st.session_state.get("user_audio_mime", "audio/wav")
 
@@ -407,7 +411,6 @@ if main_menu == "我要用AI":
                         final_q_bytes = get_bytes_from_input(new_q_input)
                         final_q_mime = getattr(new_q_input, "type", "audio/wav")
 
-                    # 處理回應語音覆蓋邏輯 (優寫採用錄音/上傳，若無則對修正文字重新生成 TTS)
                     new_r_input = r_audio_rec or r_audio_file
                     if new_r_input:
                         final_r_bytes = get_bytes_from_input(new_r_input)
