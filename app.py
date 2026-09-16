@@ -41,7 +41,7 @@ st.markdown(
 )
 
 
-# --- 2. 資料庫初始化 (新增 BLOB 欄位儲存語音) ---
+# --- 2. 資料庫初始化 (含自動相容與修復舊 Schema) ---
 def make_hashes(password):
   return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -50,6 +50,7 @@ def init_db():
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
 
+  # 1. 建立 users 資料表
   cursor.execute("""CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         username TEXT UNIQUE, 
@@ -60,7 +61,7 @@ def init_db():
         gender TEXT, 
         created_at DATETIME)""")
 
-  # 建立 feedback 資料表 (語音檔改以 BLOB 欄位儲存)
+  # 2. 建立 feedback 資料表
   cursor.execute("""CREATE TABLE IF NOT EXISTS feedback (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         user_id TEXT, 
@@ -81,6 +82,25 @@ def init_db():
         is_ready_for_ai INTEGER DEFAULT 0, 
         timestamp DATETIME)""")
 
+  # 🛠️ 自動檢測與補齊舊資料庫缺少的欄位 (防止 OperationalError)
+  cursor.execute("PRAGMA table_info(feedback)")
+  existing_cols = [c[1] for c in cursor.fetchall()]
+
+  required_cols = [
+      ("q_audio_data", "BLOB"),
+      ("q_audio_mime", "TEXT"),
+      ("r_audio_data", "BLOB"),
+      ("r_audio_mime", "TEXT"),
+      ("is_edited", "INTEGER DEFAULT 0"),
+      ("error_count", "INTEGER DEFAULT 0"),
+      ("is_ready_for_ai", "INTEGER DEFAULT 0"),
+  ]
+
+  for col_name, col_type in required_cols:
+    if col_name not in existing_cols:
+      cursor.execute(f"ALTER TABLE feedback ADD COLUMN {col_name} {col_type}")
+
+  # 3. 建立 community_votes 資料表
   cursor.execute("""CREATE TABLE IF NOT EXISTS community_votes (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         feedback_id INTEGER, 
