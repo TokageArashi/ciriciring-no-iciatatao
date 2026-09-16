@@ -238,8 +238,8 @@ if "user_info" not in st.session_state:
     st.session_state.user_info = None
 
 with st.sidebar:
-    st.title("👤 會員中心")
-    st.caption("☁️ 連線模式：Supabase 雲端資料庫")
+    st.title("👤 vahay do kararay 會員中心")
+    st.caption("☁️ 雲端資料庫已連線")
     if st.session_state.user_info is None:
         auth_choice = st.radio("請選擇：", ["登入", "註冊帳號"])
         if auth_choice == "登入":
@@ -278,9 +278,9 @@ with st.sidebar:
             st.rerun()
 
 # --- 7. 主頁面區塊 ---
-main_menu = st.radio("", ["我要用AI", "看別人用AI", "關於本站"], horizontal=True)
+main_menu = st.radio("", ["miAI ko 我要用AI", "manita so tao a miAI 看別人用AI", "amian so AI ori 關於本站"], horizontal=True)
 
-if main_menu == "我要用AI":
+if main_menu == "miAI ko 我要用AI":
     st.subheader("💬 AI 對話與語音語料採集")
     if st.session_state.user_info is None:
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
@@ -436,7 +436,7 @@ if main_menu == "我要用AI":
                         del st.session_state.ai_data
                         st.rerun()
 
-elif main_menu == "看別人用AI":
+elif main_menu == "manita so tao a miAI 看別人用AI":
     st.subheader("📖 社群公開語料審查與盲投票")
     
     try:
@@ -527,7 +527,7 @@ elif main_menu == "看別人用AI":
                         st.success("🎉 投票已送出！")
                         st.rerun()
 
-elif main_menu == "關於本站":
+elif main_menu == "amian so AI ori 關於本站":
     st.markdown("""
 ### 關於本站：蘭嶼在地化語言學習與語料採集平台
 
