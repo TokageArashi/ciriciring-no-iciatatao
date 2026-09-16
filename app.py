@@ -183,7 +183,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 你是一個達悟語（Yami/Tao）對話與翻譯助手。
 
 【唯一合法參考語料庫】:
-{corpus_context}
+　　{corpus_context}
 
 【檢索與生成規則】：
 1. **單字與詞組拆解**：請將使用者輸入的句子拆解為單字或短語，並在【唯一合法參考語料庫】中搜尋包含這些單字/短語的例句與詞彙。
