@@ -13,7 +13,7 @@ import streamlit as st
 
 # --- 1. 常數與全域設定 ---
 DB_NAME = "tao_corpus.db"
-MODEL_NAME = "gemini-1.5-flash"  # 使用標準 Gemini 模型名稱
+MODEL_NAME = "gemini-3.6-flash"  # 使用標準 Gemini 模型名稱
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
