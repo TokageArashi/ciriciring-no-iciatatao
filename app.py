@@ -154,18 +154,27 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    legal_corpus = []
+legal_corpus = []
+    
+    # 1. 從 Supabase 讀取基礎語料庫 (corpus 表)
     try:
-        # 從 Supabase 讀取 ready 的語料
-        res = supabase.from_("feedback").select("id, q_original, q_trans, r_tao, r_zh, is_ready_for_ai").execute()
-        for r in res.data:
-            if r.get("is_ready_for_ai") == 1 or "[FormosanBank]" in str(r.get("q_original")):
-                source_type = "社群驗證#15" if r.get("is_ready_for_ai") == 1 else "FormosanBank"
-                legal_corpus.append(
-                    f"[{source_type} ID #{r['id']}] 達悟語: {r['q_original']} | 中文: {r['q_trans']} | 回應達悟語: {r['r_tao']} | 回應中文: {r['r_zh']}"
-                )
+        res_corpus = supabase.from_("corpus").select("*").execute()
+        for r in res_corpus.data:
+            legal_corpus.append(
+                f"[基礎語料 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
+            )
     except Exception as e:
-        st.warning(f"⚠️ 從 Supabase 讀取語料庫提示：{e}")
+        st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
+
+    # 2. 從 Supabase 讀取社群驗證通過的語料 (feedback 表且 is_ready_for_ai = 1)
+    try:
+        res_feedback = supabase.from_("feedback").select("*").eq("is_ready_for_ai", 1).execute()
+        for r in res_feedback.data:
+            legal_corpus.append(
+                f"[社群驗證 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
+            )
+    except Exception as e:
+        st.warning(f"⚠️ 從 Supabase 讀取 feedback 語料庫提示：{e}")
 
     corpus_context = "\n".join(legal_corpus) if legal_corpus else "【警告：Supabase 目前無可用合法語料】"
 
