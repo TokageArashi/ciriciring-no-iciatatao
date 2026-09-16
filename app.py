@@ -17,13 +17,16 @@ from supabase import create_client, Client
 def init_supabase() -> Client:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 supabase = init_supabase()
 
-# --- 讀取 Supabase 語料範例 ---
+# --- 讀取 Supabase 語料範例 (修正語法) ---
 def load_corpus_from_supabase():
-    # 查詢語料表格 (假設表名為 feedback)
-    response = supabase.table("feedback").select("*").execute()
+    # 新版 Supabase SDK 請使用 .from_() 代替 .table()
+    response = supabase.from_("feedback").select("*").execute()
+    
+    # response.data 即為回傳的資料列表
     return response.data
 
 # 在頁面上顯示資料測試
