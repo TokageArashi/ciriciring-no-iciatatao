@@ -446,6 +446,10 @@ elif main_menu == "看別人用AI":
         st.error(f"無法從 Supabase 讀取資料：{e}")
         rows = []
 
+    # 💡 新增：顯示目前資料庫中實際存留的對話總數
+    total_count = len(rows)
+    st.info(f"📊 目前系統中共有 **{total_count}** 筆有效的對話語料記錄。")
+
     if not rows:
         st.info("目前 Supabase 中尚無語料資料。")
     else:
