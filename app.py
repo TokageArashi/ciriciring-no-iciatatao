@@ -202,7 +202,7 @@ system_prompt = f"""
 """
 
 
-       contents = [system_prompt]
+contents = [system_prompt]
 
     if audio_file is not None:
         try:
