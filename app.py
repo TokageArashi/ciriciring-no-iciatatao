@@ -178,8 +178,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 
     corpus_context = "\n".join(legal_corpus) if legal_corpus else "【警告：Supabase 目前無可用合法語料】"
 
-# --- 修改後的 AI Prompt 指示 ---
-system_prompt = f"""
+    system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。
 
 【唯一合法參考語料庫】:
@@ -201,8 +200,7 @@ system_prompt = f"""
 }}
 """
 
-
-contents = [system_prompt]
+    contents = [system_prompt]
 
     if audio_file is not None:
         try:
