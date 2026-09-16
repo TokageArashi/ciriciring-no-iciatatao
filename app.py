@@ -12,7 +12,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-1.5-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -188,9 +188,10 @@ def process_ai_input(text_prompt=None, audio_file=None):
 【唯一合規參考語料庫】:
 {corpus_context}
 
-【規則】：
-1. **參考資料限制**：你必須只從【唯一合規參考語料庫】中尋找相似或相符的「完整句子」。引用之參考資料數量**最多不得超過 5 句**。若找不到合適的完整句子，請於 reference 中明確註明「無相符合規參考語料」。
-2. **翻譯與回應**：請根據檢索到的語料進行最適切的達悟語回應與雙向翻譯。
+【參考資料比對與引用規則】：
+1. **比對優先序**：原則上與使用者輸入句子「相同字數越多越好」。
+2. **單字與關鍵字備選**：若無法找到多字相符的句子，可以只參考包含「一個字」的例句；在此情況下，必須以句子中的「關鍵字（核心實詞/動詞/名詞）」優先採納，而「文法標記（如格位標記 o, no, do、焦點標記等虛詞）」可忽略不計。
+3. **來源與數量限制**：僅能從【唯一合規參考語料庫】中尋找並引用，最多**不得超過 5 句**。若完全無可參考之語料，請於 reference 中註明「無相符合規參考語料」。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -199,7 +200,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "列出所引用的完整句子與語料 ID（最多 5 句），無相符者請填寫無相符合規語料"
+  "reference": "說明引用的完整句子與語料 ID（最多 5 句），並註明匹配的關鍵字；若無則填寫無相符合規參考語料"
 }}
 """
 
@@ -333,7 +334,6 @@ if main_menu == "我要用AI":
                     with st.spinner("⏳ AI 思考與語音合成中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
                         if ai_data:
-                            # 💡 針對使用者輸入的文字自動合成語音 (TTS)
                             q_tts_bytes = generate_tts_bytes(ai_data.get("user_recognized_tao", text_input))
                             r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
                             
@@ -354,7 +354,6 @@ if main_menu == "我要用AI":
             st.info(
                 f"**【句子 1 - 輸入與辨識】**\n* 辨識/原文：{ai_data.get('user_recognized_tao', q_orig)}\n* 翻譯：{ai_data.get('user_translation', '')}"
             )
-            # 播放使用者輸入的語音 (文字輸入則播放自動產生的語音)
             if st.session_state.get("user_audio_bytes"):
                 st.audio(st.session_state.user_audio_bytes, format=st.session_state.get("user_audio_mime", "audio/mp3"))
 
