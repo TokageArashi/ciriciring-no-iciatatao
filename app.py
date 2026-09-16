@@ -529,7 +529,7 @@ elif main_menu == "關於本站":
     st.markdown("""
 ### 關於本站：蘭嶼在地化語言學習與語料採集平台
 
-歡迎使用 **ciriciring no iciatatao (眾語)**！本平台致力於結合 AI 技術與社群力量，推動達悟語（Yami/Tao）的保存、學習與對話應用。透過雙向翻譯、語音轉寫、AI 對答與社群審查機制，我們希望建立一個精準且道地的達悟語數位語料庫。
+歡迎使用 **ciriciring no iciatatao (眾語)**！本平台致力於結合 AI 技術與社群力量，推動達悟語（Yami/Tao）的保存、學習與對對話應用。透過雙向翻譯、語音轉寫、AI 對答與社群審查機制，我們希望建立一個精準且道地的達悟語數位語料庫。
 
 以下為本平台的三大核心功能使用指南：
 
@@ -557,26 +557,36 @@ elif main_menu == "關於本站":
 
 歡迎多加利用與分享，共同為達悟語的數位保存與文化傳承盡一份心力！
 """)
-    # 於「關於本站」區塊新增表單
-st.markdown("---")
-st.subheader("📝 提交網站修訂建議")
-with st.form(key="suggestion_form"):
-    user_email_input = st.text_input("您的聯絡信箱（選填）：", value=st.session_state.user_info["email"] if st.session_state.user_info else "")
-    suggestion_type = st.selectbox("建議類型：", ["語料與翻譯建議", "功能與介面改善", "系統錯誤(Bug)回報", "其他"])
-    suggestion_text = st.text_area("建議內容：", placeholder="請詳細描述您的建議或遇到問題...")
 
-    submit_sug = st.form_submit_button("🚀 送出建議")
+    # 於「關於本站」區塊新增修訂建議表單
+    st.markdown("---")
+    st.subheader("📝 提交網站修訂建議")
+    with st.form(key="suggestion_form"):
+        user_email_input = st.text_input(
+            "您的聯絡信箱（選填）：",
+            value=st.session_state.user_info["email"] if st.session_state.user_info else ""
+        )
+        suggestion_type = st.selectbox(
+            "建議類型：",
+            ["語料與翻譯建議", "功能與介面改善", "系統錯誤(Bug)回報", "其他"]
+        )
+        suggestion_text = st.text_area(
+            "建議內容：",
+            placeholder="請詳細描述您的建議或遇到問題..."
+        )
 
-    if submit_sug:
-        if suggestion_text.strip():
-            sug_data = {
-                "user_id": st.session_state.user_info["username"] if st.session_state.user_info else "guest",
-                "email": user_email_input,
-                "category": suggestion_type,
-                "content": suggestion_text,
-                "timestamp": datetime.datetime.now().isoformat()
-            }
-            supabase.from_("site_suggestions").insert(sug_data).execute()
-            st.success("🎉 感謝您的寶貴建議！我們將會認真評估並持續改進網站。")
-        else:
-            st.warning("請輸入建議內容後再送出。")
+        submit_sug = st.form_submit_button("🚀 送出建議")
+
+        if submit_sug:
+            if suggestion_text.strip():
+                sug_data = {
+                    "user_id": st.session_state.user_info["username"] if st.session_state.user_info else "guest",
+                    "email": user_email_input,
+                    "category": suggestion_type,
+                    "content": suggestion_text,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+                supabase.from_("site_suggestions").insert(sug_data).execute()
+                st.success("🎉 感謝您的寶貴建議！我們將會認真評估並持續改進網站。")
+            else:
+                st.warning("請輸入建議內容後再送出。")
