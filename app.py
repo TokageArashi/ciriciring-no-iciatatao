@@ -12,7 +12,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-3.6-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -157,37 +157,40 @@ def process_ai_input(text_prompt=None, audio_file=None):
 
     legal_corpus = []
     
+    # 1. 從 corpus 讀取官方語料
     try:
         res_corpus = supabase.from_("corpus").select("*").execute()
         for r in res_corpus.data:
             legal_corpus.append(
-                f"[基礎語料 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
+                f"[Corpus 語料 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
             )
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
 
+    # 2. 從 feedback 讀取「超過 15 人投票」且「通過驗證」的語料
     try:
         res_feedback = supabase.from_("feedback").select("*").eq("is_ready_for_ai", 1).execute()
         for r in res_feedback.data:
-            legal_corpus.append(
-                f"[社群驗證 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
-            )
+            f_id = r.get("id")
+            votes_res = supabase.from_("community_votes").select("id").eq("feedback_id", f_id).execute()
+            if len(votes_res.data) >= 15:
+                legal_corpus.append(
+                    f"[15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
+                )
     except Exception as e:
-        st.warning(f"⚠️ 從 Supabase 讀取 feedback 語料庫提示：{e}")
+        st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
 
-    corpus_context = "\n".join(legal_corpus) if legal_corpus else "【警告：Supabase 目前無可用合法語料】"
+    corpus_context = "\n".join(legal_corpus) if legal_corpus else "【目前尚無合規的參考語料】"
 
     system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。
 
-【唯一合法參考語料庫】:
+【唯一合規參考語料庫】:
 {corpus_context}
 
-【檢索與生成規則】：
-1. **單字與詞組拆解**：請將使用者輸入的句子拆解為單字或短語，並在【唯一合法參考語料庫】中搜尋包含這些單字/短語的例句與詞彙。
-2. **組合回答**：即使沒有一模一樣的整句例句，只要語料庫中包含該句子相關的單字、詞組或語法結構，請協助進行組合與翻譯。
-3. **邊界限制**：若使用者輸入的關鍵單字完全未出現在語料庫中，也可以使用該單字回答，然必須檢查語料庫中是否有可能的同音字，並標註該字為使用者推薦字。
-4. **造字原則**：若不得已必須使用語料庫中沒有的字，可以用達悟語的詞根自行組合，或者使用音譯，然必須標註為AI生成字，並標註該字使用的語根或音譯自何語言的何字。
+【規則】：
+1. **參考資料限制**：你必須只從【唯一合規參考語料庫】中尋找相似或相符的「完整句子」。引用之參考資料數量**最多不得超過 5 句**。若找不到合適的完整句子，請於 reference 中明確註明「無相符合規參考語料」。
+2. **翻譯與回應**：請根據檢索到的語料進行最適切的達悟語回應與雙向翻譯。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -196,7 +199,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "詳細說明引用的語料 ID、單字來源、拆解邏輯或造字標註"
+  "reference": "列出所引用的完整句子與語料 ID（最多 5 句），無相符者請填寫無相符合規語料"
 }}
 """
 
@@ -207,7 +210,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
             audio_bytes = get_bytes_from_input(audio_file)
             mime_type = getattr(audio_file, "type", "audio/wav")
             contents.append({"mime_type": mime_type, "data": audio_bytes})
-            contents.append("請對照【唯一合法語料庫】進行語音轉寫與回應，絕不使用庫外單字。")
+            contents.append("請對照【唯一合規參考語料庫】進行語音轉寫與回應。")
         except Exception as e:
             st.error(f"讀取錄音檔失敗：{e}")
             return None
@@ -327,14 +330,17 @@ if main_menu == "我要用AI":
             text_input = st.text_input("請輸入問題或句子：", placeholder="例如：Akokay 或 今天天氣如何？")
             if st.button("🚀 發送文字詢問"):
                 if text_input.strip():
-                    with st.spinner("⏳ AI 思考中..."):
+                    with st.spinner("⏳ AI 思考與語音合成中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
                         if ai_data:
+                            # 💡 針對使用者輸入的文字自動合成語音 (TTS)
+                            q_tts_bytes = generate_tts_bytes(ai_data.get("user_recognized_tao", text_input))
                             r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
+                            
                             st.session_state.active_q = text_input
                             st.session_state.ai_data = ai_data
-                            st.session_state.user_audio_bytes = None
-                            st.session_state.user_audio_mime = None
+                            st.session_state.user_audio_bytes = q_tts_bytes
+                            st.session_state.user_audio_mime = "audio/mp3" if q_tts_bytes else None
                             st.session_state.ai_audio_bytes = r_tts_bytes
                             st.session_state.ai_audio_mime = "audio/mp3" if r_tts_bytes else None
                             st.session_state.active_bg = current_bg
@@ -348,8 +354,9 @@ if main_menu == "我要用AI":
             st.info(
                 f"**【句子 1 - 輸入與辨識】**\n* 辨識/原文：{ai_data.get('user_recognized_tao', q_orig)}\n* 翻譯：{ai_data.get('user_translation', '')}"
             )
+            # 播放使用者輸入的語音 (文字輸入則播放自動產生的語音)
             if st.session_state.get("user_audio_bytes"):
-                st.audio(st.session_state.user_audio_bytes, format=st.session_state.get("user_audio_mime", "audio/wav"))
+                st.audio(st.session_state.user_audio_bytes, format=st.session_state.get("user_audio_mime", "audio/mp3"))
 
             st.success(
                 f"**【句子 2 - AI 對話回答】**\n* 達悟語：{ai_data.get('ai_reply_tao', '')}\n* 中文對照：{ai_data.get('ai_reply_zh', '')}"
@@ -357,9 +364,8 @@ if main_menu == "我要用AI":
             if st.session_state.get("ai_audio_bytes"):
                 st.audio(st.session_state.ai_audio_bytes, format="audio/mp3")
 
-            # 💡 顯式呈現 AI 參考資料 / 語料來源
             st.warning(
-                f"**【📚 參考資料 / 語料來源】**\n* {ai_data.get('reference', '未提供參考資料')}"
+                f"**【📚 參考資料 / 語料來源（上限 5 句）】**\n* {ai_data.get('reference', '未提供參考資料')}"
             )
 
             st.divider()
@@ -403,13 +409,13 @@ if main_menu == "我要用AI":
                 e_ref = st.text_input("修改【參考資料 / 語料來源】：", value=ai_data.get("reference", ""))
 
                 if st.button("💾 儲存修正版至 Supabase"):
-                    final_q_bytes = st.session_state.get("user_audio_bytes")
-                    final_q_mime = st.session_state.get("user_audio_mime", "audio/wav")
-
                     new_q_input = q_audio_rec or q_audio_file
                     if new_q_input:
                         final_q_bytes = get_bytes_from_input(new_q_input)
                         final_q_mime = getattr(new_q_input, "type", "audio/wav")
+                    else:
+                        final_q_bytes = generate_tts_bytes(e_q_tao)
+                        final_q_mime = "audio/mp3" if final_q_bytes else None
 
                     new_r_input = r_audio_rec or r_audio_file
                     if new_r_input:
