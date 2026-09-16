@@ -446,24 +446,22 @@ elif main_menu == "看別人用AI":
         st.error(f"無法從 Supabase 讀取資料：{e}")
         rows = []
 
-    # 💡 新增：顯示目前資料庫中實際存留的對話總數
-    total_count = len(rows)
-    st.info(f"📊 目前系統中共有 **{total_count}** 筆有效的對話語料記錄。")
-
     if not rows:
         st.info("目前 Supabase 中尚無語料資料。")
     else:
         current_username = st.session_state.user_info["username"] if st.session_state.user_info else None
 
-        for row in rows:
-            f_id = row["id"]
+# 使用 enumerate 取得當前列表中的顯示順序 (i)
+        for i, row in enumerate(rows, start=1):
+            f_id = row["id"]  # 資料庫實際 ID，內部刪除/投票仍需使用此 ID
             owner_id = row.get("user_id", "匿名")
             region = row.get("region", "未知")
             is_edited = row.get("is_edited", 0)
             error_count = row.get("error_count", 0)
             status_tag = "✏️ 經修訂" if is_edited else ("❌ 含有錯" if error_count > 0 else "✅ 原始產出")
 
-            with st.expander(f"💬 對話 #{f_id} | 上傳者：{owner_id} | 部落：{region} | 狀態：{status_tag}"):
+            # 💡 將外層顯示名稱改為第 i 筆，並保留系統 ID 供對照
+            with st.expander(f"💬 對話 第 {i} 筆 (ID #{f_id}) | 上傳者：{owner_id} | 部落：{region} | 狀態：{status_tag}"):
                 st.markdown("**【句子 1 - 輸入與翻譯】**")
                 st.write(f"1. 達悟語：{row.get('q_original')}")
                 st.write(f"2. 翻譯：{row.get('q_trans')}")
