@@ -10,6 +10,27 @@ import google.generativeai as genai
 from gtts import gTTS
 import pandas as pd
 import streamlit as st
+from supabase import create_client, Client
+
+# --- 初始化 Supabase 連線 ---
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+supabase = init_supabase()
+
+# --- 讀取 Supabase 語料範例 ---
+def load_corpus_from_supabase():
+    # 查詢語料表格 (假設表名為 feedback)
+    response = supabase.table("feedback").select("*").execute()
+    return response.data
+
+# 在頁面上顯示資料測試
+st.title("🏝️ Supabase 語料庫連線測試")
+data = load_corpus_from_supabase()
+st.write(data)
 
 # --- 1. 常數與全域設定 ---
 DB_NAME = "corpus.CSV"
