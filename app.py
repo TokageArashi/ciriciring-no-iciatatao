@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 # --- 1. 常數與全域設定 ---
-DB_NAME = "tao_corpus.db"
+DB_NAME = "corpus.CSV"
 MODEL_NAME = "gemini-3.6-flash"  # 使用標準 Gemini 模型名稱
 
 st.set_page_config(
@@ -313,9 +313,9 @@ def process_ai_input(text_prompt=None, audio_file=None):
 你**絕不能**使用網路資料、現場自由生成拼法、或你預訓練模型中的任何外部知識。
 你**唯一**能使用的語料與單字庫如下所示：
 
-==== 唯一合法 tao_corpus.db 語料庫開始 ====
+==== 唯一合法 corpus.CSV 語料庫開始 ====
 {corpus_context}
-==== 唯一合法 tao_corpus.db 語料庫結束 ====
+==== 唯一合法 corpus.CSV 語料庫結束 ====
 
 【嚴格回答規範】：
 1. **單字限制**：你輸出的達悟語句子，只能使用上方【唯一合法語料庫】中出現過的字詞與單字。禁止自行創造可能的同音拼法。
