@@ -4,21 +4,16 @@ import io
 import json
 import os
 import sqlite3
-import time
 import uuid
 
 import google.generativeai as genai
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 from gtts import gTTS
 import pandas as pd
 import streamlit as st
 
 # --- 1. 常數與全域設定 ---
 DB_NAME = "tao_corpus.db"
-MODEL_NAME = "gemini-3.6-flash"  # 建議使用標準模型名稱
-ADMIN_EMAIL = "kymco3903@gmail.com"  # 填入您的個人 Gmail 信箱
+MODEL_NAME = "gemini-1.5-flash"  # 使用標準 Gemini 模型名稱
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -39,137 +34,14 @@ st.markdown(
     """
     <div style='text-align: center; padding-top: 5px; padding-bottom: 15px;'>
         <h1 style='font-size: 42px; font-weight: bold; color: #1E3A8A;'>ciriciring no iciatatao</h1>
-        <div style='font-size: 24px; color: #4B5563; font-weight: 600;'>眾語 (雲端永久儲存版)</div>
+        <div style='font-size: 24px; color: #4B5563; font-weight: 600;'>眾語 (SQLite 資料庫版)</div>
     </div>
 """,
     unsafe_allow_html=True,
 )
 
 
-# --- 2. Google Drive API 自動建立/取得資料夾機制 ---
-def get_drive_service():
-  creds_dict = dict(st.secrets["gcp_service_account"])
-  creds = service_account.Credentials.from_service_account_info(
-      creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
-  )
-  return build("drive", "v3", credentials=creds)
-
-
-def get_or_create_target_folder():
-  """若 secrets 沒填 FOLDER_ID，則由 Service Account 自動建立並共用給管理員"""
-  folder_id = st.secrets.get("FOLDER_ID", "")
-  if folder_id:
-    return folder_id
-
-  try:
-    service = get_drive_service()
-    query = (
-        "name = 'Tao_Corpus_Data' and mimeType ="
-        " 'application/vnd.google-apps.folder' and trashed = false"
-    )
-    results = service.files().list(q=query, fields="files(id)").execute()
-    items = results.get("files", [])
-
-    if items:
-      return items[0]["id"]
-    else:
-      file_metadata = {
-          "name": "Tao_Corpus_Data",
-          "mimeType": "application/vnd.google-apps.folder",
-      }
-      folder = (
-          service.files().create(body=file_metadata, fields="id").execute()
-      )
-      new_id = folder.get("id")
-
-      if ADMIN_EMAIL:
-        permission = {
-            "type": "user",
-            "role": "writer",
-            "emailAddress": ADMIN_EMAIL,
-        }
-        service.permissions().create(fileId=new_id, body=permission).execute()
-
-      return new_id
-  except Exception as e:
-    st.error(f"⚠️ Google Drive 自動取得資料夾失敗: {e}")
-    return ""
-
-
-# 全域取得資料夾 ID
-FOLDER_ID = get_or_create_target_folder()
-
-
-def upload_to_gdrive(file_data, file_name, mime_type='application/octet-stream'):
-    """上傳檔案或二進位資料至指定 Google Drive 資料夾"""
-    if not FOLDER_ID:
-        st.error("❌ 無法上傳：缺少 FOLDER_ID，請先在 secrets.toml 中設定")
-        return None
-
-    service = get_drive_service()
-    
-    # 上傳檔案的元資料 (指定父資料夾)
-    file_metadata = {
-        'name': file_name,
-        'parents': [FOLDER_ID]
-    }
-
-    # 判斷 file_data 為檔案路徑還是二進位資料
-    if isinstance(file_data, str) and os.path.exists(file_data):
-        media = MediaFileUpload(file_data, mimetype=mime_type, resumable=True)
-    elif isinstance(file_data, bytes):
-        media = MediaIoBaseUpload(io.BytesIO(file_data), mimetype=mime_type, resumable=True)
-    else:
-        st.error("❌ 上傳失敗：不支援的資料類型")
-        return None
-
-    try:
-        # 尋找資料夾內是否已有同名檔案，有則更新，無則建立
-        query = f"'{FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
-        results = service.files().list(q=query, fields="files(id)").execute()
-        existing_files = results.get('files', [])
-
-        if existing_files:
-            file_id = existing_files[0]['id']
-            file = service.files().update(
-                fileId=file_id,
-                media_body=media,
-                fields='id',
-                supportsAllDrives=True
-            ).execute()
-        else:
-            file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id',
-                supportsAllDrives=True
-            ).execute()
-            
-            # 【關鍵修復】：將建立的檔案權限新增給個人 Gmail
-            if ADMIN_EMAIL:
-                permission = {
-                    'type': 'user',
-                    'role': 'writer',
-                    'emailAddress': ADMIN_EMAIL
-                }
-                service.permissions().create(
-                    fileId=file.get('id'), 
-                    body=permission,
-                    sendNotificationEmail=False
-                ).execute()
-
-        return file.get('id')
-    except Exception as e:
-        st.error(f"❌ 雲端硬碟同步失敗 ({file_name}): {e}")
-        return None
-
-
-def sync_db_to_gdrive():
-  """將最新 sqlite 檔同步至 Google Drive"""
-  upload_to_gdrive(DB_NAME, "tao_corpus.db", "application/x-sqlite3")
-
-
-# --- 3. 資料庫初始化與會員機制 ---
+# --- 2. 資料庫初始化 (新增 BLOB 欄位儲存語音) ---
 def make_hashes(password):
   return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -179,41 +51,46 @@ def init_db():
   cursor = conn.cursor()
 
   cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, email TEXT,
-        region TEXT, age_group TEXT, gender TEXT, created_at DATETIME)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        username TEXT UNIQUE, 
+        password TEXT, 
+        email TEXT,
+        region TEXT, 
+        age_group TEXT, 
+        gender TEXT, 
+        created_at DATETIME)""")
 
+  # 建立 feedback 資料表 (語音檔改以 BLOB 欄位儲存)
   cursor.execute("""CREATE TABLE IF NOT EXISTS feedback (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, user_email TEXT, region TEXT, age_group TEXT, gender TEXT,
-        q_original TEXT, q_trans TEXT, q_audio_path TEXT,
-        r_tao TEXT, r_zh TEXT, r_audio_path TEXT,
-        is_edited INTEGER DEFAULT 0, error_count INTEGER DEFAULT 0, is_ready_for_ai INTEGER DEFAULT 0, timestamp DATETIME)""")
-
-  cursor.execute("PRAGMA table_info(feedback)")
-  existing_cols = [c[1] for c in cursor.fetchall()]
-  required_cols = [
-      ("user_id", "TEXT"),
-      ("user_email", "TEXT"),
-      ("region", "TEXT"),
-      ("age_group", "TEXT"),
-      ("gender", "TEXT"),
-      ("q_original", "TEXT"),
-      ("q_trans", "TEXT"),
-      ("q_audio_path", "TEXT"),
-      ("r_tao", "TEXT"),
-      ("r_zh", "TEXT"),
-      ("r_audio_path", "TEXT"),
-      ("is_edited", "INTEGER DEFAULT 0"),
-      ("error_count", "INTEGER DEFAULT 0"),
-      ("is_ready_for_ai", "INTEGER DEFAULT 0"),
-      ("timestamp", "DATETIME"),
-  ]
-  for col_name, col_type in required_cols:
-    if col_name not in existing_cols:
-      cursor.execute(f"ALTER TABLE feedback ADD COLUMN {col_name} {col_type}")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        user_id TEXT, 
+        user_email TEXT, 
+        region TEXT, 
+        age_group TEXT, 
+        gender TEXT,
+        q_original TEXT, 
+        q_trans TEXT, 
+        q_audio_data BLOB, 
+        q_audio_mime TEXT,
+        r_tao TEXT, 
+        r_zh TEXT, 
+        r_audio_data BLOB, 
+        r_audio_mime TEXT,
+        is_edited INTEGER DEFAULT 0, 
+        error_count INTEGER DEFAULT 0, 
+        is_ready_for_ai INTEGER DEFAULT 0, 
+        timestamp DATETIME)""")
 
   cursor.execute("""CREATE TABLE IF NOT EXISTS community_votes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, feedback_id INTEGER, voter_id TEXT, region TEXT, age_group TEXT,
-        gender TEXT, vote_result TEXT, hidden_suggestion TEXT, timestamp DATETIME,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        feedback_id INTEGER, 
+        voter_id TEXT, 
+        region TEXT, 
+        age_group TEXT,
+        gender TEXT, 
+        vote_result TEXT, 
+        hidden_suggestion TEXT, 
+        timestamp DATETIME,
         UNIQUE(feedback_id, voter_id))""")
 
   conn.commit()
@@ -223,6 +100,7 @@ def init_db():
 init_db()
 
 
+# --- 3. 會員機制 ---
 def add_user(username, password, email, region, age_group, gender):
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
@@ -261,50 +139,28 @@ def login_user(username, password):
   return data
 
 
-# --- 4. 語音處理與資料庫存取輔助函數 ---
-def save_audio_bytes_permanently(audio_bytes, suffix=".wav"):
-  """將語音二進位檔案寫入本地暫存並自動同步至 Google Drive"""
-  if not audio_bytes:
+# --- 4. 語音處理輔助函數 (直接處理 Bytes) ---
+def get_bytes_from_input(audio_input):
+  """將 Streamlit 輸入的語音轉換為 raw bytes"""
+  if not audio_input:
     return None
-  try:
-    file_name = f"audio_{uuid.uuid4().hex[:10]}{suffix}"
-
-    if hasattr(audio_bytes, "seek"):
-      audio_bytes.seek(0)
-
-    if hasattr(audio_bytes, "read"):
-      raw_bytes = audio_bytes.read()
-    else:
-      raw_bytes = audio_bytes
-
-    upload_to_gdrive(
-        raw_bytes,
-        file_name,
-        mime_type="audio/wav" if suffix == ".wav" else "audio/mp3",
-    )
-
-    os.makedirs("audio_files", exist_ok=True)
-    local_path = os.path.join("audio_files", file_name)
-    with open(local_path, "wb") as f:
-      f.write(raw_bytes)
-
-    return local_path
-  except Exception as e:
-    st.error(f"儲存語音檔失敗: {e}")
-    return None
+  if hasattr(audio_input, "seek"):
+    audio_input.seek(0)
+  if hasattr(audio_input, "read"):
+    return audio_input.read()
+  return audio_input
 
 
-def generate_tts_audio(text):
+def generate_tts_bytes(text):
+  """生成 TTS 語音並傳回二進位資料 (bytes)"""
   if not text:
     return None
   try:
     tts = gTTS(text=text, lang="id", slow=False)
-    file_name = f"tts_{uuid.uuid4().hex[:10]}.mp3"
-    os.makedirs("audio_files", exist_ok=True)
-    file_path = os.path.join("audio_files", file_name)
-    tts.save(file_path)
-    upload_to_gdrive(file_path, file_name, mime_type="audio/mp3")
-    return file_path
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    return fp.read()
   except Exception:
     return None
 
@@ -314,10 +170,12 @@ def save_語料_to_db(
     bg_info,
     q_orig,
     q_trans,
-    q_audio,
+    q_audio_bytes,
+    q_mime,
     r_tao,
     r_zh,
-    r_audio,
+    r_audio_bytes,
+    r_mime,
     is_edited=False,
     is_error=False,
 ):
@@ -328,8 +186,12 @@ def save_語料_to_db(
 
   cursor.execute(
       """
-        INSERT INTO feedback (user_id, user_email, region, age_group, gender, q_original, q_trans, q_audio_path, r_tao, r_zh, r_audio_path, is_edited, error_count, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO feedback (
+            user_id, user_email, region, age_group, gender, 
+            q_original, q_trans, q_audio_data, q_audio_mime, 
+            r_tao, r_zh, r_audio_data, r_audio_mime, 
+            is_edited, error_count, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
       (
           user_info["username"],
@@ -339,10 +201,12 @@ def save_語料_to_db(
           bg_info["gender"],
           q_orig,
           q_trans,
-          q_audio,
+          sqlite3.Binary(q_audio_bytes) if q_audio_bytes else None,
+          q_mime,
           r_tao,
           r_zh,
-          r_audio,
+          sqlite3.Binary(r_audio_bytes) if r_audio_bytes else None,
+          r_mime,
           edited_flag,
           err_cnt,
           datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -351,7 +215,6 @@ def save_語料_to_db(
 
   conn.commit()
   conn.close()
-  sync_db_to_gdrive()
 
 
 # --- 5. AI 處理邏輯 ---
@@ -405,7 +268,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 1. **單字限制**：你輸出的達悟語句子，只能使用上方【唯一合法語料庫】中出現過的字詞與單字。禁止自行創造可能的同音拼法。
 2. **新詞/未收錄字標註機制**：
    * 若回應時「不得不使用」語料庫中未收錄的字，你必須將該字標記為【AI生成字】。
-   * 且必須在 reference 欄位詳細說明其「構詞語根組合」（例如：由哪些詞綴/詞幹組合）或「音譯來源」（例如：音譯自哪種語言的哪個原詞）。
+   * 且必須在 reference 欄位詳細說明其「構詞語根組合」或「音譯來源」。
 3. **回應格式**：請嚴格以 JSON 格式輸出：
 
 {{
@@ -413,7 +276,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "1. [引用例句] - [來源: tao_corpus.db (FormosanBank 或 社群驗證#15 ID)]\\n2. 【AI生成字說明】(若無使用新字則填寫「無 AI 生成字，全數引用自語料庫」)：單字 X [語根組合: aka- + -an] 或 [音譯自中文: 學校]"
+  "reference": "1. [引用例句] - [來源: tao_corpus.db]\\n2. 【AI生成字說明】..."
 }}
 """
 
@@ -421,8 +284,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 
   if audio_file is not None:
     try:
-      audio_file.seek(0)
-      audio_bytes = audio_file.read()
+      audio_bytes = get_bytes_from_input(audio_file)
       mime_type = getattr(audio_file, "type", "audio/wav")
       contents.append({"mime_type": mime_type, "data": audio_bytes})
       contents.append(
@@ -456,7 +318,7 @@ if "user_info" not in st.session_state:
 
 with st.sidebar:
   st.title("👤 會員中心")
-  st.caption(f"📁 資料保存路徑：\n`{DB_NAME}`")
+  st.caption(f"📁 本地 SQLite 資料庫：\n`{DB_NAME}`")
   if st.session_state.user_info is None:
     auth_choice = st.radio("請選擇：", ["登入", "註冊帳號"])
     if auth_choice == "登入":
@@ -590,8 +452,9 @@ if main_menu == "我要用AI":
       if voice_input is not None:
         if st.session_state.get("last_processed_audio") != voice_input:
           with st.spinner("⏳ 正在聽取語音並依達悟語音系轉寫中..."):
-            user_audio_path = save_audio_bytes_permanently(voice_input)
-            voice_input.seek(0)
+            audio_bytes = get_bytes_from_input(voice_input)
+            mime_type = getattr(voice_input, "type", "audio/wav")
+
             ai_data = process_ai_input(audio_file=voice_input)
 
             if ai_data:
@@ -599,7 +462,8 @@ if main_menu == "我要用AI":
                   "user_recognized_tao", "語音輸入"
               )
               st.session_state.ai_data = ai_data
-              st.session_state.user_audio_path = user_audio_path
+              st.session_state.user_audio_bytes = audio_bytes
+              st.session_state.user_audio_mime = mime_type
               st.session_state.active_bg = current_bg
               st.session_state.last_processed_audio = voice_input
               st.rerun()
@@ -615,14 +479,17 @@ if main_menu == "我要用AI":
             if ai_data:
               st.session_state.active_q = text_input
               st.session_state.ai_data = ai_data
-              st.session_state.user_audio_path = None
+              st.session_state.user_audio_bytes = None
+              st.session_state.user_audio_mime = None
               st.session_state.active_bg = current_bg
 
     if "ai_data" in st.session_state and st.session_state.ai_data:
       ai_data = st.session_state.ai_data
       q_orig = st.session_state.get("active_q", "")
       bg_info = st.session_state.get("active_bg", current_bg)
-      input_audio_saved = st.session_state.get("user_audio_path", None)
+
+      q_audio_bytes = st.session_state.get("user_audio_bytes", None)
+      q_audio_mime = st.session_state.get("user_audio_mime", "audio/wav")
 
       st.markdown("---")
       st.info(
@@ -630,9 +497,9 @@ if main_menu == "我要用AI":
           f" 辨識/原文：{ai_data.get('user_recognized_tao', q_orig)}\n*"
           f" 翻譯：{ai_data.get('user_translation', '')}"
       )
-      if input_audio_saved and os.path.exists(input_audio_saved):
+      if q_audio_bytes:
         st.write("🔊 **輸入的達悟語原音：**")
-        st.audio(input_audio_saved)
+        st.audio(q_audio_bytes, format=q_audio_mime)
 
       st.success(
           "**【句子 2 - AI 對話回答】**\n*"
@@ -643,10 +510,10 @@ if main_menu == "我要用AI":
       ref_info = ai_data.get("reference", "尚無標註參考來源")
       st.warning(f"📚 **【語料參考資料出處】**\n{ref_info}")
 
-      r_tts = generate_tts_audio(ai_data.get("ai_reply_tao", ""))
-      if r_tts:
+      r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao", ""))
+      if r_tts_bytes:
         st.write("🔊 **AI 回答語音預覽：**")
-        st.audio(r_tts, format="audio/mp3")
+        st.audio(r_tts_bytes, format="audio/mp3")
 
       st.divider()
       st.subheader("📝 語料品質評估與覆蓋錄音")
@@ -656,8 +523,12 @@ if main_menu == "我要用AI":
           horizontal=True,
       )
 
-      final_q_audio_default = input_audio_saved or generate_tts_audio(
+      # 預設提問語音（若無輸入語音則生成 TTS 語音 bytes）
+      final_q_bytes = q_audio_bytes or generate_tts_bytes(
           ai_data.get("user_recognized_tao", q_orig)
+      )
+      final_q_mime = (
+          q_audio_mime if q_audio_bytes else "audio/mp3"
       )
 
       if eval_choice == "正確":
@@ -667,14 +538,16 @@ if main_menu == "我要用AI":
               bg_info,
               ai_data.get("user_recognized_tao", q_orig),
               ai_data.get("user_translation"),
-              final_q_audio_default,
+              final_q_bytes,
+              final_q_mime,
               ai_data.get("ai_reply_tao"),
               ai_data.get("ai_reply_zh"),
-              r_tts,
+              r_tts_bytes,
+              "audio/mp3",
               is_edited=False,
               is_error=False,
           )
-          st.success("🎉 語料與語音檔已順利儲存至 Google Drive！")
+          st.success("🎉 語料與二進位語音檔已順利直接儲存至 SQLite 資料庫！")
           del st.session_state.ai_data
 
       elif eval_choice == "錯誤":
@@ -716,10 +589,12 @@ if main_menu == "我要用AI":
               bg_info,
               ai_data.get("user_recognized_tao", q_orig),
               ai_data.get("user_translation"),
-              final_q_audio_default,
+              final_q_bytes,
+              final_q_mime,
               ai_data.get("ai_reply_tao"),
               ai_data.get("ai_reply_zh"),
-              r_tts,
+              r_tts_bytes,
+              "audio/mp3",
               is_edited=False,
               is_error=True,
           )
@@ -727,15 +602,26 @@ if main_menu == "我要用AI":
           del st.session_state.ai_data
 
         if col_e2.button("💾 編輯完成 (送出修正版)"):
-          new_q_path = (
-              save_audio_bytes_permanently(re_audio_q)
+          new_q_bytes = (
+              get_bytes_from_input(re_audio_q)
               if re_audio_q
-              else final_q_audio_default
+              else final_q_bytes
           )
-          new_r_path = (
-              save_audio_bytes_permanently(re_audio_r, suffix=".mp3")
+          new_q_mime = (
+              getattr(re_audio_q, "type", "audio/wav")
+              if re_audio_q
+              else final_q_mime
+          )
+
+          new_r_bytes = (
+              get_bytes_from_input(re_audio_r)
               if re_audio_r
-              else r_tts
+              else r_tts_bytes
+          )
+          new_r_mime = (
+              getattr(re_audio_r, "type", "audio/wav")
+              if re_audio_r
+              else "audio/mp3"
           )
 
           save_語料_to_db(
@@ -743,25 +629,31 @@ if main_menu == "我要用AI":
               bg_info,
               e_q_tao,
               e_q_trans,
-              new_q_path,
+              new_q_bytes,
+              new_q_mime,
               e_r_tao,
               e_r_zh,
-              new_r_path,
+              new_r_bytes,
+              new_r_mime,
               is_edited=True,
               is_error=False,
           )
-          st.success(
-              "🎉 修正版文字與覆蓋語音檔已順利儲存至 Google Drive！"
-          )
+          st.success("🎉 修正版文字與覆蓋語音檔已順利儲存至 SQLite 資料庫！")
           del st.session_state.ai_data
 
 elif main_menu == "看別人用AI":
   st.subheader("📖 社群公開語料審查與盲投票")
   conn = sqlite3.connect(DB_NAME)
-  df = pd.read_sql_query("SELECT * FROM feedback ORDER BY id DESC", conn)
+  cursor = conn.cursor()
+  cursor.execute(
+      "SELECT id, user_id, region, is_edited, error_count, q_original, q_trans,"
+      " q_audio_data, q_audio_mime, r_tao, r_zh, r_audio_data, r_audio_mime,"
+      " is_ready_for_ai FROM feedback ORDER BY id DESC"
+  )
+  rows = cursor.fetchall()
   conn.close()
 
-  if df.empty:
+  if not rows:
     st.info("目前尚無對話語料。")
   else:
     current_voter = (
@@ -770,28 +662,41 @@ elif main_menu == "看別人用AI":
         else "guest"
     )
 
-    for _, row in df.iterrows():
-      f_id = row["id"]
+    for row in rows:
+      f_id = row[0]
+      region = row[2]
+      is_edited = row[3]
+      error_count = row[4]
+      q_original = row[5]
+      q_trans = row[6]
+      q_audio_data = row[7]
+      q_audio_mime = row[8]
+      r_tao = row[9]
+      r_zh = row[10]
+      r_audio_data = row[11]
+      r_audio_mime = row[12]
+      is_ready_for_ai = row[13]
+
       status_tag = (
           "✏️ 經修訂"
-          if row["is_edited"]
-          else ("❌ 含有錯" if row["error_count"] > 0 else "✅ 原始產出")
+          if is_edited
+          else ("❌ 含有錯" if error_count > 0 else "✅ 原始產出")
       )
 
       with st.expander(
-          f"💬 對話 #{f_id} | 來源部落：{row['region']} | 狀態：{status_tag}"
+          f"💬 對話 #{f_id} | 來源部落：{region} | 狀態：{status_tag}"
       ):
         st.markdown("**【句子 1 - 輸入與翻譯】**")
-        st.write(f"1. 達悟語：{row['q_original']}")
-        st.write(f"2. 翻譯：{row['q_trans']}")
-        if row["q_audio_path"] and os.path.exists(row["q_audio_path"]):
-          st.audio(row["q_audio_path"])
+        st.write(f"1. 達悟語：{q_original}")
+        st.write(f"2. 翻譯：{q_trans}")
+        if q_audio_data:
+          st.audio(q_audio_data, format=q_audio_mime or "audio/wav")
 
         st.markdown("**【句子 2 - 對答與翻譯】**")
-        st.write(f"3. 達悟語：{row['r_tao']}")
-        st.write(f"4. 中文對照：{row['r_zh']}")
-        if row["r_audio_path"] and os.path.exists(row["r_audio_path"]):
-          st.audio(row["r_audio_path"])
+        st.write(f"3. 達悟語：{r_tao}")
+        st.write(f"4. 中文對照：{r_zh}")
+        if r_audio_data:
+          st.audio(r_audio_data, format=r_audio_mime or "audio/mp3")
 
         st.divider()
 
@@ -818,14 +723,13 @@ elif main_menu == "看別人用AI":
               f" {correct_pct:.1f}%"
           )
 
-          if correct_pct >= 80.0 and row["is_ready_for_ai"] == 0:
+          if correct_pct >= 80.0 and is_ready_for_ai == 0:
             conn = sqlite3.connect(DB_NAME)
             conn.execute(
                 "UPDATE feedback SET is_ready_for_ai = 1 WHERE id = ?", (f_id,)
             )
             conn.commit()
             conn.close()
-            sync_db_to_gdrive()
         else:
           st.info(
               f"🔒 社群盲投票進行中：目前累積 {vote_count}/15 票（滿 15"
@@ -858,9 +762,11 @@ elif main_menu == "看別人用AI":
             cursor = conn.cursor()
             cursor.execute(
                 """
-                                INSERT INTO community_votes (feedback_id, voter_id, region, age_group, gender, vote_result, hidden_suggestion, timestamp)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
+                    INSERT INTO community_votes (
+                        feedback_id, voter_id, region, age_group, gender, 
+                        vote_result, hidden_suggestion, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     f_id,
                     voter["username"],
@@ -874,7 +780,6 @@ elif main_menu == "看別人用AI":
             )
             conn.commit()
             conn.close()
-            sync_db_to_gdrive()
             st.success(
                 "🎉 投票成功！感謝您為達悟語資料庫貢獻一份力量。"
             )
