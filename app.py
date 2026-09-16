@@ -12,7 +12,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-1.5-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -77,10 +77,10 @@ def login_user(username, password):
         st.error(f"登入查詢失敗：{e}")
         return []
 
-# --- 3. Supabase 資料庫讀寫函式 ---
+# --- 3. Supabase 資料庫讀寫函式 (已修復語音 BYTEA 欄位) ---
 def save_語料_to_supabase(
-    user_info, bg_info, q_orig, q_trans, q_audio_url,
-    r_tao, r_zh, r_audio_url, is_edited=False, is_error=False
+    user_info, bg_info, q_orig, q_trans, q_audio_bytes, q_mime,
+    r_tao, r_zh, r_audio_bytes, r_mime, is_edited=False, is_error=False
 ):
     try:
         data = {
@@ -91,10 +91,13 @@ def save_語料_to_supabase(
             "gender": bg_info["gender"],
             "q_original": q_orig,
             "q_trans": q_trans,
-            "q_audio_url": q_audio_url,
-            "r_tao": r_tao,
-            "r_zh": r_zh,
-            "r_audio_url": r_audio_url,
+            # 將 bytes 轉成 PostgreSQL 二進位 hex 格式 (\x...)
+            "q_audio_data": f"\\x{q_audio_bytes.hex()}" if q_audio_bytes else None,
+            "q_audio_mime": q_mime,
+            "tao_text": r_tao,
+            "zh_text": r_zh,
+            "r_audio_data": f"\\x{r_audio_bytes.hex()}" if r_audio_bytes else None,
+            "r_audio_mime": r_mime,
             "is_edited": 1 if is_edited else 0,
             "error_count": 1 if is_error else 0,
             "timestamp": datetime.datetime.now().isoformat()
@@ -171,7 +174,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
         res_feedback = supabase.from_("feedback").select("*").eq("is_ready_for_ai", 1).execute()
         for r in res_feedback.data:
             legal_corpus.append(
-                f"[社群驗證 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
+                f"[社群驗證 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
             )
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 feedback 語料庫提示：{e}")
@@ -309,12 +312,14 @@ if main_menu == "我要用AI":
                 if st.session_state.get("last_processed_audio") != voice_input:
                     with st.spinner("⏳ 正在聽取語音並依達悟語音系轉寫中..."):
                         audio_bytes = get_bytes_from_input(voice_input)
+                        mime_type = getattr(voice_input, "type", "audio/wav")
                         ai_data = process_ai_input(audio_file=voice_input)
 
                         if ai_data:
                             st.session_state.active_q = ai_data.get("user_recognized_tao", "語音輸入")
                             st.session_state.ai_data = ai_data
                             st.session_state.user_audio_bytes = audio_bytes
+                            st.session_state.user_audio_mime = mime_type
                             st.session_state.active_bg = current_bg
                             st.session_state.last_processed_audio = voice_input
                             st.rerun()
@@ -329,6 +334,7 @@ if main_menu == "我要用AI":
                             st.session_state.active_q = text_input
                             st.session_state.ai_data = ai_data
                             st.session_state.user_audio_bytes = None
+                            st.session_state.user_audio_mime = None
                             st.session_state.active_bg = current_bg
 
         if "ai_data" in st.session_state and st.session_state.ai_data:
@@ -350,13 +356,18 @@ if main_menu == "我要用AI":
 
             if eval_choice == "正確":
                 if st.button("✅ 直接送出儲存至 Supabase"):
+                    # 自動合成 AI 回應音檔 (TTS)
+                    r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
+                    
                     if save_語料_to_supabase(
                         st.session_state.user_info, bg_info,
-                        ai_data.get("user_recognized_tao", q_orig), ai_data.get("user_translation"), None,
-                        ai_data.get("ai_reply_tao"), ai_data.get("ai_reply_zh"), None,
+                        ai_data.get("user_recognized_tao", q_orig), ai_data.get("user_translation"),
+                        st.session_state.get("user_audio_bytes"), st.session_state.get("user_audio_mime"),
+                        ai_data.get("ai_reply_tao"), ai_data.get("ai_reply_zh"),
+                        r_tts_bytes, "audio/mp3" if r_tts_bytes else None,
                         is_edited=False, is_error=False
                     ):
-                        st.success("🎉 語料已成功寫入 Supabase 雲端資料庫！")
+                        st.success("🎉 語料與語音檔已成功寫入 Supabase 雲端資料庫！")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -368,13 +379,17 @@ if main_menu == "我要用AI":
                 e_r_zh = st.text_input("修改【句子 2 翻譯】：", value=ai_data.get("ai_reply_zh", ""))
 
                 if st.button("💾 儲存修正版至 Supabase"):
+                    r_tts_bytes = generate_tts_bytes(e_r_tao)
+                    
                     if save_語料_to_supabase(
                         st.session_state.user_info, bg_info,
-                        e_q_tao, e_q_trans, None,
-                        e_r_tao, e_r_zh, None,
+                        e_q_tao, e_q_trans,
+                        st.session_state.get("user_audio_bytes"), st.session_state.get("user_audio_mime"),
+                        e_r_tao, e_r_zh,
+                        r_tts_bytes, "audio/mp3" if r_tts_bytes else None,
                         is_edited=True, is_error=False
                     ):
-                        st.success("🎉 修正版語料已成功儲存至 Supabase！")
+                        st.success("🎉 修正版語料與語音已成功儲存至 Supabase！")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -406,10 +421,16 @@ elif main_menu == "看別人用AI":
                 st.markdown("**【句子 1 - 輸入與翻譯】**")
                 st.write(f"1. 達悟語：{row.get('q_original')}")
                 st.write(f"2. 翻譯：{row.get('q_trans')}")
+                # 展示提問錄音檔
+                if row.get("q_audio_data"):
+                    st.audio(bytes.fromhex(row["q_audio_data"].replace("\\x", "")), format=row.get("q_audio_mime", "audio/wav"))
 
                 st.markdown("**【句子 2 - 對答與翻譯】**")
-                st.write(f"3. 達悟語：{row.get('r_tao')}")
-                st.write(f"4. 中文對照：{row.get('r_zh')}")
+                st.write(f"3. 達悟語：{row.get('tao_text')}")
+                st.write(f"4. 中文對照：{row.get('zh_text')}")
+                # 展示回應語音檔
+                if row.get("r_audio_data"):
+                    st.audio(bytes.fromhex(row["r_audio_data"].replace("\\x", "")), format=row.get("r_audio_mime", "audio/mp3"))
 
                 st.divider()
 
