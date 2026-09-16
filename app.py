@@ -12,7 +12,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-3.6-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -33,7 +33,7 @@ st.markdown(
     """
     <div style='text-align: center; padding-top: 5px; padding-bottom: 15px;'>
         <h1 style='font-size: 42px; font-weight: bold; color: #1E3A8A;'>ciriciring no iciatatao</h1>
-        <div style='font-size: 24px; color: #4B5563; font-weight: 600;'>眾語 (Supabase 雲端版)</div>
+        <div style='font-size: 24px; color: #4B5563; font-weight: 600;'>眾語</div>
     </div>
 """,
     unsafe_allow_html=True,
@@ -262,9 +262,9 @@ with st.sidebar:
             new_u = st.text_input("設定帳號")
             new_p = st.text_input("設定密碼", type="password")
             new_e = st.text_input("信箱")
-            new_r = st.selectbox("部落：", ["椰油", "朗島", "東清", "野銀", "紅頭", "漁人", "巴丹", "台灣", "其他"])
-            new_a = st.selectbox("年齡：", ["學齡前", "國小", "國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81歲及以上"])
-            new_g = st.selectbox("性別：", ["男", "女", "不公開"])
+            new_r = st.selectbox("部落：", ["Jiyayo 椰油", "Jiraralay 朗島", "Jiranmilek 東清", "Jivalino 野銀", "Jimowrod 紅頭", "Jiratay 漁人", "Ivatan 巴丹", "Ji Taywan 台灣", "ilaod 其他"])
+            new_a = st.selectbox("年齡：", ["alikey 學齡前", "kosiaw 國小", "kocong aka kawcong 國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "ikaroa a ngernan o kakawakawan 81歲及以上"])
+            new_g = st.selectbox("性別：", ["mehakay 男", "mavakes 女", "ji nipanci 不公開"])
             if st.button("註冊"):
                 if add_user(new_u, new_p, new_e, new_r, new_a, new_g):
                     st.success("註冊成功，請切換登入。")
@@ -287,9 +287,9 @@ if main_menu == "我要用AI":
     else:
         user = st.session_state.user_info
         st.markdown("##### 📱 本次輸入者設定")
-        r_list = ["椰油", "朗島", "東清", "野銀", "紅頭", "漁人", "巴丹", "台灣", "其他"]
-        a_list = ["學齡前", "國小", "國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81歲及以上"]
-        g_list = ["男", "女", "不公開"]
+        r_list = ["Jiyayo 椰油", "Jiraralay 朗島", "Jiranmilek 東清", "Jivalino 野銀", "Jimowrod 紅頭", "Jiratay 漁人", "Ivatan 巴丹", "Ji Taywan 台灣", "ilaod 其他"]
+        a_list = ["alikey 學齡前", "kosiaw 國小", "kocong aka kawcong 國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "ikaroa a ngernan o kakawakawan 81歲及以上"]
+        g_list = ["mehakay 男", "mavakes 女", "ji nipanci 不公開"]
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -557,8 +557,7 @@ elif main_menu == "關於本站":
 
 歡迎多加利用與分享，共同為達悟語的數位保存與文化傳承盡一份心力！
 """)
-
-# 於「關於本站」區塊新增表單
+    # 於「關於本站」區塊新增表單
 st.markdown("---")
 st.subheader("📝 提交網站修訂建議")
 with st.form(key="suggestion_form"):
