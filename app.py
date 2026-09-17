@@ -39,23 +39,14 @@ st.set_page_config(
 
 
 st.markdown(
-
     """
-
     <style>
-
     div[role='radiogroup'] label { font-size: 20px !important; font-weight: bold !important; padding: 5px !important; }
-
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
-
     .stTextInput input { font-size: 18px !important; }
-
     </style>
-
 """,
-
     unsafe_allow_html=True,
-
 )
 
 
@@ -63,15 +54,10 @@ st.markdown(
 st.markdown(
 
     """
-
     <div style='text-align: center; padding-top: 5px; padding-bottom: 15px;'>
-
         <h1 style='font-size: 42px; font-weight: bold; color: #1E3A8A;'>ciriciring no iciatatao</h1>
-
         <div style='font-size: 24px; color: #4B5563; font-weight: 600;'>眾語</div>
-
     </div>
-
 """,
 
     unsafe_allow_html=True,
