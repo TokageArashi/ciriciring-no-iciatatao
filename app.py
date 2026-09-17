@@ -437,7 +437,7 @@ if main_menu == "miAI ko 我要用AI":
                         st.rerun()
 
 elif main_menu == "manita so tao a miAI 看別人用AI":
-    st.subheader("📖 社群公開語料審查與盲投票")
+    st.subheader("📖 vakong no cireng kano mapili 社群公開語料審查與投票")
     
     try:
         res = supabase.from_("feedback").select("*").order("id", desc=True).execute()
