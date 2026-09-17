@@ -6,3 +6,8 @@ google-api-python-client
 google-auth
 google-auth-httplib2
 supabase
+streamlit
+google-generativeai
+gTTS
+pandas
+supabase
