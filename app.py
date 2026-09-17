@@ -302,7 +302,7 @@ if main_menu == "miAI ko 我要用AI":
 
         st.divider()
 
-        input_type = st.radio("apen mo o pangap mo do vahey ta 請選擇輸入方式：", ["🎤 koan ko 達悟語語音輸入", "mivatvatek ko ⌨️ 文字輸入"], horizontal=True)
+        input_type = st.radio("apen mo o pangap mo do vahey ta 請選擇輸入方式：", ["🎤 koan ko 達悟語語音輸入", "⌨️ mivatvatek ko 文字輸入"], horizontal=True)
 
         if input_type == "🎤 koan ko 達悟語語音輸入":
             st.caption("meypespes so maykevon oya, no teyka meyzezyak am teyka rana 請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識：")
