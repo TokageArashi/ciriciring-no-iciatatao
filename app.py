@@ -262,9 +262,9 @@ with st.sidebar:
             new_u = st.text_input("設定帳號")
             new_p = st.text_input("設定密碼", type="password")
             new_e = st.text_input("信箱")
-            new_r = st.selectbox("部落：", ["Jiyayo 椰油", "Jiraralay 朗島", "Jiranmilek 東清", "Jivalino 野銀", "Jimowrod 紅頭", "Jiratay 漁人", "Ivatan 巴丹", "Ji Taywan 台灣", "ilaod 其他"])
-            new_a = st.selectbox("年齡：", ["alikey 學齡前", "kosiaw 國小", "kocong aka kawcong 國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "ikaroa a ngernan o kakawakawan 81歲及以上"])
-            new_g = st.selectbox("性別：", ["mehakay 男", "mavakes 女", "ji nipanci 不公開"])
+            new_r = st.selectbox("ili 部落：", ["Jiyayo 椰油", "Jiraralay 朗島", "Jiranmilek 東清", "Jivalino 野銀", "Jimowrod 紅頭", "Jiratay 漁人", "Ivatan 巴丹", "Ji Taywan 台灣", "ilaod 其他"])
+            new_a = st.selectbox("kakawakawan 年齡：", ["alikey 學齡前", "kosiaw 國小", "kocong aka kawcong 國高中", "18-30", "31-40", "41-50", "51-60", "61-70", "71-80", "ikaroa a ngernan o kakawakawan 81歲及以上"])
+            new_g = st.selectbox("mikataretarek 性別：", ["mehakay 男", "mavakes 女", "ji nipanci 不公開"])
             if st.button("註冊"):
                 if add_user(new_u, new_p, new_e, new_r, new_a, new_g):
                     st.success("註冊成功，請切換登入。")
@@ -281,7 +281,7 @@ with st.sidebar:
 main_menu = st.radio("", ["miAI ko 我要用AI", "manita so tao a miAI 看別人用AI", "amian so AI ori 關於本站"], horizontal=True)
 
 if main_menu == "miAI ko 我要用AI":
-    st.subheader("💬 AI 對話與語音語料採集")
+    st.subheader("💬 macisirisiring do AI kano misinsinmo so vakong no AI AI 對話與語音語料採集")
     if st.session_state.user_info is None:
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
     else:
@@ -293,20 +293,20 @@ if main_menu == "miAI ko 我要用AI":
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            cur_r = st.selectbox("部落：", r_list, index=r_list.index(user["region"]) if user["region"] in r_list else 0)
+            cur_r = st.selectbox("ili 部落：", r_list, index=r_list.index(user["region"]) if user["region"] in r_list else 0)
         with c2:
-            cur_a = st.selectbox("年齡：", a_list, index=a_list.index(user["age_group"]) if user["age_group"] in a_list else 3)
+            cur_a = st.selectbox("kakawakawan 年齡：", a_list, index=a_list.index(user["age_group"]) if user["age_group"] in a_list else 3)
         with c3:
-            cur_g = st.selectbox("性別：", g_list, index=g_list.index(user["gender"]) if user["gender"] in g_list else 0)
+            cur_g = st.selectbox("mikataretarek 性別：", g_list, index=g_list.index(user["gender"]) if user["gender"] in g_list else 0)
         current_bg = {"region": cur_r, "age_group": cur_a, "gender": cur_g}
 
         st.divider()
 
-        input_type = st.radio("請選擇輸入方式：", ["🎤 達悟語語音輸入", "⌨️ 文字輸入"], horizontal=True)
+        input_type = st.radio("apen mo o pangap mo do vahey ta 請選擇輸入方式：", ["🎤 koan ko 達悟語語音輸入", "mivatvatek ko ⌨️ 文字輸入"], horizontal=True)
 
-        if input_type == "🎤 達悟語語音輸入":
-            st.caption("請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識：")
-            voice_input = st.audio_input("點擊麥克風開始錄音", key="voice_input_main")
+        if input_type == "🎤 koan ko 達悟語語音輸入":
+            st.caption("meypespes so maykevon oya, no teyka meyzezyak am teyka rana 請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識：")
+            voice_input = st.audio_input("mapalolo so ciring 開始錄音", key="voice_input_main")
 
             if voice_input is not None:
                 if st.session_state.get("last_processed_audio") != voice_input:
@@ -328,8 +328,8 @@ if main_menu == "miAI ko 我要用AI":
                             st.rerun()
 
         else:
-            text_input = st.text_input("請輸入問題或句子：", placeholder="例如：Akokay 或 今天天氣如何？")
-            if st.button("🚀 發送文字詢問"):
+            text_input = st.text_input("manvood so teygami 請輸入：", placeholder="例如：Akokay/今天天氣如何？")
+            if st.button("🚀 itoro so teygami 發送文字詢問"):
                 if text_input.strip():
                     with st.spinner("⏳ AI 思考與語音合成中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
@@ -352,13 +352,13 @@ if main_menu == "miAI ko 我要用AI":
 
             st.markdown("---")
             st.info(
-                f"**【句子 1 - 輸入與辨識】**\n* 辨識/原文：{ai_data.get('user_recognized_tao', q_orig)}\n* 翻譯：{ai_data.get('user_translation', '')}"
+                f"**【句子 1 - maniring o tao am 輸入與辨識】**\n* ciriciring no tao 辨識/mivaliw 原文：{ai_data.get('user_recognized_tao', q_orig)}\n* 翻譯：{ai_data.get('user_translation', '')}"
             )
             if st.session_state.get("user_audio_bytes"):
                 st.audio(st.session_state.user_audio_bytes, format=st.session_state.get("user_audio_mime", "audio/mp3"))
 
             st.success(
-                f"**【句子 2 - AI 對話回答】**\n* 達悟語：{ai_data.get('ai_reply_tao', '')}\n* 中文對照：{ai_data.get('ai_reply_zh', '')}"
+                f"**【句子 2 - maniring o AI am AI 對話回答】**\n* ciriciring no tao 達悟(雅美)語：{ai_data.get('ai_reply_tao', '')}\n* mivaliw 中文對照：{ai_data.get('ai_reply_zh', '')}"
             )
             if st.session_state.get("ai_audio_bytes"):
                 st.audio(st.session_state.ai_audio_bytes, format="audio/mp3")
@@ -369,7 +369,7 @@ if main_menu == "miAI ko 我要用AI":
 
             st.divider()
             st.subheader("📝 語料品質評估")
-            eval_choice = st.radio("這組 AI 辨識與翻譯是否正確？", ["正確", "錯誤"], horizontal=True)
+            eval_choice = st.radio("manakem mo o ipanci mo? 這組 AI 辨識與翻譯是否正確？", ["正確", "錯誤"], horizontal=True)
 
             if eval_choice == "正確":
                 if st.button("✅ 直接送出儲存至 Supabase"):
