@@ -232,18 +232,9 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 5. AI 處理邏輯 ---
-def process_ai_input(text_prompt=None, audio_file=None):
-    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
-        "GOOGLE_API_KEY"
-    )
-    if not api_key:
-        st.error("❌ 找不到 GOOGLE_API_KEY，請檢查 Secrets 設定")
-        return None
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(MODEL_NAME)
-
+# --- 快取語料庫讀取 (設定 ttl 為 300 秒，避免每次 API 請求都重新撈取全表) ---
+@st.cache_data(ttl=300)
+def fetch_legal_corpus():
     legal_corpus = []
 
     # 1. 從 corpus 讀取官方語料
@@ -256,28 +247,43 @@ def process_ai_input(text_prompt=None, audio_file=None):
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
 
-    # 2. 從 feedback 讀取「超過 15 人投票」且「通過驗證」的語料
+    # 2. 優化 N+1 查詢：一次撈取 feedback 及其對應的投票數
     try:
+        # 使用 select inner/left join 一次帶出 community_votes 的計數
         res_feedback = (
             supabase.from_("feedback")
-            .select("*")
+            .select("*, community_votes(id)")
             .eq("is_ready_for_ai", 1)
             .execute()
         )
         for r in res_feedback.data:
-            f_id = r.get("id")
-            votes_res = (
-                supabase.from_("community_votes")
-                .select("id")
-                .eq("feedback_id", f_id)
-                .execute()
-            )
-            if len(votes_res.data) >= 15:
+            votes = r.get("community_votes", [])
+            if len(votes) >= 15:
+                f_id = r.get("id")
                 legal_corpus.append(
                     f"[Feedback 15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
                 )
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
+
+    # 避免 Prompt 過大，建議可以限制傳給 Prompt 的最高筆數上限（例如最多 100 筆）
+    return legal_corpus[-100:] if legal_corpus else []
+
+
+# --- 5. AI 處理邏輯 ---
+def process_ai_input(text_prompt=None, audio_file=None):
+    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
+        "GOOGLE_API_KEY"
+    )
+    if not api_key:
+        st.error("❌ 找不到 GOOGLE_API_KEY，請檢查 Secrets 設定")
+        return None
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(MODEL_NAME)
+
+    # 呼叫快取函式取得語料
+    legal_corpus = fetch_legal_corpus()
 
     corpus_context = (
         "\n".join(legal_corpus)
@@ -336,12 +342,11 @@ def process_ai_input(text_prompt=None, audio_file=None):
                 contents,
                 generation_config={
                     "response_mime_type": "application/json",
-                    "temperature": 0.2,  # 稍微調高至 0.2，有助於 AI 在檢索聯想時更加靈活挑選接近的語料
+                    "temperature": 0.2,
                 },
             )
             result = json.loads(response.text)
 
-            # 強制將達悟語句首字母轉為小寫
             if "user_recognized_tao" in result:
                 result["user_recognized_tao"] = lower_first_char(
                     result["user_recognized_tao"]
