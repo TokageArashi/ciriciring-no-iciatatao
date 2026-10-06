@@ -13,6 +13,21 @@ import pandas as pd
 import streamlit as st
 from supabase import Client, create_client
 
+import streamlit.components.v1 as components
+
+# 自動將頁面上所有 input 與 textarea 標籤的 spellcheck 屬性設為 false
+components.html(
+    """
+    <script>
+        const inputs = parent.document.querySelectorAll('input, textarea');
+        inputs.forEach(input => {
+            input.setAttribute('spellcheck', 'false');
+        });
+    </script>
+    """,
+    height=0,
+)
+
 # --- 1. 全域設定與 Supabase 連線 ---
 MODEL_NAME = "gemini-3.6-flash"  # 已修正為正確的 Gemini 模型名稱
 
