@@ -243,7 +243,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
         res_corpus = supabase.from_("corpus").select("*").execute()
         for r in res_corpus.data:
             legal_corpus.append(
-                f"[Corpus 語料 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
+                f"[Corpus 官方語料 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
             )
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
@@ -266,10 +266,10 @@ def process_ai_input(text_prompt=None, audio_file=None):
             )
             if len(votes_res.data) >= 15:
                 legal_corpus.append(
-                    f"[15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
+                    f"[Feedback 15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
                 )
     except Exception as e:
-        st.warning(f"⚠️️ 從 Supabase 讀取社群驗證語料提示：{e}")
+        st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
 
     corpus_context = (
         "\n".join(legal_corpus)
@@ -283,19 +283,22 @@ def process_ai_input(text_prompt=None, audio_file=None):
 【唯一合規參考語料庫】:
 {corpus_context}
 
-【參考資料比對與引用規則】：
-1. **比對優先序**：原則上與使用者輸入句子「相同字數越多越好」。
-2. **單字與關鍵字備選**：若無法找到多字相符的句子，可以只參考包含「一個字」的例句；在此情況下，必須以句子中的「關鍵字（核心實詞/動詞/名詞）」優先採納，而「文法標記（如格位標記 o, no, do、焦點標記等虛詞）」可忽略不計。
-3. **來源與數量限制**：僅能從【唯一合規參考語料庫】中尋找並引用，最多**不得超過 5 句**。若完全無可參考之語料，請於 reference 中註明「無相符合規參考語料」。
+【參考資料比對與引用規則（強制執行）】：
+1. **強制引用原則**：你**必須**從【唯一合規參考語料庫】中，挑選出**至少 1 筆且最多 5 筆**最相關的語料作為參考資料。絕不能填寫「無參考資料」或留空。
+2. **相似度比對優先序**：
+   - 優先搜尋：句意相似或包含相同字詞數最多的句子。
+   - 次要搜尋：若無完整匹配句子，請比對核心關鍵字（如核心動詞、名詞、主詞），忽略格位標記（o, no, do）或焦點標記。
+   - 備選方案：若完全找不到情境相同的句子，請挑選語法結構最接近，或包含共通單字的語料。
+3. **大小寫規範**：達悟語句子的句首字母**不需要大寫**，請統一保持為小寫。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
 {{
-  "user_recognized_tao": "使用者輸入的達悟語或對照羅馬字",
+  "user_recognized_tao": "使用者輸入的達悟語或對照羅馬字（句首保持小寫）",
   "user_translation": "中文對照翻譯",
-  "ai_reply_tao": "達悟語回應句子",
+  "ai_reply_tao": "達悟語回應句子（句首保持小寫）",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "說明引用的完整句子與語料 ID（最多 5 句），並註明匹配的關鍵字；若無則填寫無相符合規參考語料"
+  "reference": "必須列出至少 1 筆引用的完整句子與語料 ID（格式：[語料類型 ID #X] 句子...），並簡短說明比對到的關鍵字或關聯性"
 }}
 """
 
@@ -307,7 +310,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
             mime_type = getattr(audio_file, "type", "audio/wav")
             contents.append({"mime_type": mime_type, "data": audio_bytes})
             contents.append(
-                "請對照【唯一合規參考語料庫】進行語音轉寫與回應。"
+                "請對照【唯一合規參考語料庫】進行語音轉寫與回應，並務必附上至少一筆參考資料。"
             )
         except Exception as e:
             st.error(f"讀取錄音檔失敗：{e}")
@@ -325,10 +328,22 @@ def process_ai_input(text_prompt=None, audio_file=None):
                 contents,
                 generation_config={
                     "response_mime_type": "application/json",
-                    "temperature": 0.0,
+                    "temperature": 0.2,  # 稍微調高至 0.2，有助於 AI 在檢索聯想時更加靈活挑選接近的語料
                 },
             )
-            return json.loads(response.text)
+            result = json.loads(response.text)
+
+            # 強制將達悟語句首字母轉為小寫
+            if "user_recognized_tao" in result:
+                result["user_recognized_tao"] = lower_first_char(
+                    result["user_recognized_tao"]
+                )
+            if "ai_reply_tao" in result:
+                result["ai_reply_tao"] = lower_first_char(
+                    result["ai_reply_tao"]
+                )
+
+            return result
         except ResourceExhausted:
             if attempt < max_retries - 1:
                 wait_time = (attempt + 1) * 5
