@@ -249,7 +249,6 @@ def fetch_legal_corpus():
 
     # 2. 優化 N+1 查詢：一次撈取 feedback 及其對應的投票數
     try:
-        # 使用 select inner/left join 一次帶出 community_votes 的計數
         res_feedback = (
             supabase.from_("feedback")
             .select("*, community_votes(id)")
@@ -266,7 +265,6 @@ def fetch_legal_corpus():
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
 
-    # 避免 Prompt 過大，建議可以限制傳給 Prompt 的最高筆數上限（例如最多 100 筆）
     return legal_corpus[-100:] if legal_corpus else []
 
 
@@ -282,7 +280,6 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    # 呼叫快取函式取得語料
     legal_corpus = fetch_legal_corpus()
 
     corpus_context = (
@@ -334,7 +331,6 @@ def process_ai_input(text_prompt=None, audio_file=None):
     else:
         return None
 
-    # 自動重試機制
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -707,6 +703,7 @@ if main_menu == "miAI ko 我要用AI":
                 )
 
                 if st.button("💾 儲存修正版至 Supabase"):
+                    # 處理問題語音檔
                     new_q_input = q_audio_rec or q_audio_file
                     if new_q_input:
                         final_q_bytes = get_bytes_from_input(new_q_input)
@@ -719,6 +716,7 @@ if main_menu == "miAI ko 我要用AI":
                             "audio/mp3" if final_q_bytes else None
                         )
 
+                    # 處理回應語音檔
                     new_r_input = r_audio_rec or r_audio_file
                     if new_r_input:
                         final_r_bytes = get_bytes_from_input(new_r_input)
@@ -731,254 +729,114 @@ if main_menu == "miAI ko 我要用AI":
                             "audio/mp3" if final_r_bytes else None
                         )
 
+                    # 寫入資料庫
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
-                        e_q_tao,
+                        lower_first_char(e_q_tao),
                         e_q_trans,
                         final_q_bytes,
                         final_q_mime,
-                        e_r_tao,
+                        lower_first_char(e_r_tao),
                         e_r_zh,
                         final_r_bytes,
                         final_r_mime,
                         is_edited=True,
-                        is_error=False,
+                        is_error=True,
                     ):
-                        st.success(
-                            "🎉 修正版語料與更新後的語音檔已成功儲存至 Supabase！"
-                        )
+                        st.success("🎉 修正版語料與語音已成功更新至 Supabase 雲端資料庫！")
                         del st.session_state.ai_data
                         st.rerun()
 
 elif main_menu == "manita so tao a miAI 看別人用AI":
-    st.subheader("📖 vakong no cireng kano mapili 社群公開語料審查與投票")
-
+    st.subheader("👥 社群驗證與語料檢視")
     try:
         res = (
             supabase.from_("feedback")
-            .select("*")
-            .order("id", desc=True)
+            .select("*, community_votes(id, voter_username)")
+            .order("timestamp", desc=True)
             .execute()
         )
-        rows = res.data
-    except Exception as e:
-        st.error(f"無法從 Supabase 讀取資料：{e}")
-        rows = []
+        feedbacks = res.data
 
-    if not rows:
-        st.info("目前 Supabase 中尚無語料資料。")
-    else:
-        current_username = (
-            st.session_state.user_info["username"]
-            if st.session_state.user_info
-            else None
-        )
-
-        for i, row in enumerate(rows, start=1):
-            f_id = row["id"]
-            owner_id = row.get("user_id", "匿名")
-            region = row.get("region", "未知")
-            is_edited = row.get("is_edited", 0)
-            error_count = row.get("error_count", 0)
-            status_tag = (
-                "✏️ 經修訂"
-                if is_edited
-                else ("❌ 含有錯" if error_count > 0 else "✅ 原始產出")
+        if not feedbacks:
+            st.info("目前尚無採集到的語料。")
+        else:
+            current_user = (
+                st.session_state.user_info["username"]
+                if st.session_state.user_info
+                else None
             )
 
-            with st.expander(
-                f"💬 對話 第 {i} 筆 (ID #{f_id}) | 上傳者：{owner_id} |"
-                f" 部落：{region} | 狀態：{status_tag}"
-            ):
-                st.markdown("**【句子 1 - 輸入與翻譯】**")
-                st.write(f"1. 達悟語：{row.get('q_original')}")
-                st.write(f"2. 翻譯：{row.get('q_trans')}")
-                if row.get("q_audio_data"):
-                    st.audio(
-                        bytes.fromhex(
-                            row["q_audio_data"].replace("\\x", "")
-                        ),
-                        format=row.get("q_audio_mime", "audio/wav"),
-                    )
-
-                st.markdown("**【句子 2 - 對答與翻譯】**")
-                st.write(f"3. 達悟語：{row.get('tao_text')}")
-                st.write(f"4. 中文對照：{row.get('zh_text')}")
-                if row.get("r_audio_data"):
-                    st.audio(
-                        bytes.fromhex(
-                            row["r_audio_data"].replace("\\x", "")
-                        ),
-                        format=row.get("r_audio_mime", "audio/mp3"),
-                    )
-
-                st.divider()
-
-                if current_username and (
-                    current_username == owner_id or current_username == "admin"
+            for fb in feedbacks:
+                with st.expander(
+                    f"📌 語料 ID #{fb['id']} - 由 {fb['user_id']} 提供 ({fb['timestamp'][:10]})"
                 ):
-                    if st.button(
-                        f"🗑 刪除此筆資料 (ID #{f_id})", key=f"del_{f_id}"
-                    ):
-                        success, msg = delete_feedback_item(
-                            f_id, current_username
+                    col_info, col_action = st.columns([4, 1])
+
+                    with col_info:
+                        st.write(f"**問（達悟語）：** {fb.get('q_original')}")
+                        st.write(f"**問（中文）：** {fb.get('q_trans')}")
+                        st.write(f"**答（達悟語）：** {fb.get('tao_text')}")
+                        st.write(f"**答（中文）：** {fb.get('zh_text')}")
+                        st.write(
+                            f"**部落/背景：** {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}"
                         )
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    st.divider()
 
-                votes_res = (
-                    supabase.from_("community_votes")
-                    .select("*")
-                    .eq("feedback_id", f_id)
-                    .execute()
-                )
-                all_votes = votes_res.data
-                vote_count = len(all_votes)
-
-                user_voted = (
-                    any(v["voter_id"] == current_username for v in all_votes)
-                    if current_username
-                    else False
-                )
-
-                if vote_count >= 15:
-                    correct_votes = sum(
-                        1
-                        for v in all_votes
-                        if v.get("vote_result") == "正確"
-                    )
-                    correct_pct = (correct_votes / vote_count) * 100
-                    st.success(
-                        f"📊 社群盲投票結果 (已滿 15 人)：正確率 {correct_pct:.1f}%"
+                    votes = fb.get("community_votes", [])
+                    vote_count = len(votes)
+                    user_voted = any(
+                        v.get("voter_username") == current_user for v in votes
                     )
 
-                    if correct_pct >= 80.0 and row.get("is_ready_for_ai") != 1:
-                        supabase.from_("feedback").update(
-                            {"is_ready_for_ai": 1}
-                        ).eq("id", f_id).execute()
-                else:
-                    st.info(
-                        f"🔒 社群盲投票進行中：目前累積 {vote_count}/15 票。"
-                    )
+                    with col_action:
+                        st.metric("社群認同數", f"{vote_count} 票")
 
-                if st.session_state.user_info is None:
-                    st.caption("🔒 請先登入帳號以參與投票。")
-                elif user_voted:
-                    st.warning(
-                        "🖐️ 您已參與過此筆語料的投票，感謝協助！"
-                    )
-                else:
-                    st.markdown("##### 🗳️ 我要投票")
-                    vote_opt = st.radio(
-                        f"您認為對話 #{f_id} 是否道地正確？",
-                        ["正確", "錯誤"],
-                        key=f"v_opt_{f_id}",
-                        horizontal=True,
-                    )
-                    hidden_sug = st.text_area(
-                        "改善建議 (僅供 AI 學習對照)：", key=f"sug_{f_id}"
-                    )
+                        if current_user:
+                            if user_voted:
+                                st.success("已贊同")
+                            else:
+                                if st.button(
+                                    "👍 贊同 (+1)", key=f"vote_{fb['id']}"
+                                ):
+                                    supabase.from_("community_votes").insert(
+                                        {
+                                            "feedback_id": fb["id"],
+                                            "voter_username": current_user,
+                                        }
+                                    ).execute()
+                                    st.rerun()
 
-                    if st.button("送出投票", key=f"v_btn_{f_id}"):
-                        voter = st.session_state.user_info
-                        v_data = {
-                            "feedback_id": f_id,
-                            "voter_id": voter["username"],
-                            "region": voter["region"],
-                            "age_group": voter["age_group"],
-                            "gender": voter["gender"],
-                            "vote_result": vote_opt,
-                            "hidden_suggestion": hidden_sug,
-                            "timestamp": datetime.datetime.now().isoformat(),
-                        }
-                        supabase.from_("community_votes").insert(
-                            v_data
-                        ).execute()
-                        st.success("🎉 投票已送出！")
-                        st.rerun()
+                            # 權限刪除檢查 (提供者本或 admin 均可刪除)
+                            if (
+                                current_user == "admin"
+                                or fb.get("user_id") == current_user
+                            ):
+                                if st.button(
+                                    "🗑️ 刪除", key=f"del_{fb['id']}"
+                                ):
+                                    ok, msg = delete_feedback_item(
+                                        fb["id"], current_user
+                                    )
+                                    if ok:
+                                        st.success(msg)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+
+    except Exception as e:
+        st.error(f"讀取社群資料失敗：{e}")
 
 elif main_menu == "amian so AI ori 關於本站":
-    st.markdown("""
-### 關於本站：蘭嶼在地化語言學習與語料採集平台
+    st.subheader("🏝️ 關於 ciriciring no iciatatao (眾語)")
+    st.markdown(
+        """
+        ### 專案願景
+        本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合前沿大型語言模型（Gemini）與在地部落語料庫，建構即時雙向的語音與文字對話互動系統。
 
-歡迎使用 **ciriciring no iciatatao (眾語)**！本平台致力於結合 AI 技術與社群力量，推動達悟語（Yami/Tao）的保存、學習與對對話應用。透過雙向翻譯、語音轉寫、AI 對答與社群審查機制，我們希望建立一個精準且道地的達悟語數位語料庫。
-
-以下為本平台的三大核心功能使用指南：
-
-**1. 我要用 AI（對話與語料採集）**
-
-* **個人背景設定**：使用前請先於側邊欄登入，並確認您的部落、年齡與性別設定，這有助於語料的分類與記錄。
-* **輸入方式**：
-  * **🎤 達悟語語音輸入**：點擊麥克風按鈕進行錄音，系統將自動進行語音辨識、轉寫與翻譯。
-  * **⌨️ 文字輸入**：輸入達悟語或中文句子，AI 將即時給出對應翻譯與對話回應。
-* **結果確認與反饋**：
-  * **正確**：若 AI 的辨識與翻譯無誤，請點擊「直接送出儲存至 Supabase」，將高品質語料寫入資料庫。
-  * **錯誤**：若發現辨識不準或翻譯不道地，請選擇「錯誤」，即可手動修正句子文字、上傳/重新錄製正確語音，並送出修正版語料。
-
-**2. 看別人用 AI（社群公開語料審查與盲投票）**
-
-* **瀏覽社群語料**：您可以在此查看其他使用者產出的對話資料與語音檔，了解 AI 的翻譯品質與應用狀況。
-* **社群盲投票與驗證**：
-  * 每位登入使用者可針對公開語料進行「正確」或「錯誤」的投票，並留下改善建議。
-  * **AI 訓練機制**：當一筆語料累積滿 15 人投票，該語料將自動通過驗證，進入【唯一合規參考語料庫】，成為未來 AI 學習與對照的標準教材。
-* **資料管理**：您可以隨時刪除自己所提供的對話資料（管理員可管理全部資料）。
-
-**3. 關於本站**
-
-* 提供平台的成立宗旨、更新日誌與說明。
-
-歡迎多加利用與分享，共同為達悟語的數位保存與文化傳承盡一份心力！
-""")
-
-    st.markdown("---")
-    st.subheader("📝 提交網站修訂建議")
-    with st.form(key="suggestion_form"):
-        user_email_input = st.text_input(
-            "您的聯絡信箱（選填）：",
-            value=(
-                st.session_state.user_info["email"]
-                if st.session_state.user_info
-                else ""
-            ),
-        )
-        suggestion_type = st.selectbox(
-            "建議類型：",
-            [
-                "語料與翻譯建議",
-                "功能與介面改善",
-                "系統錯誤(Bug)回報",
-                "其他",
-            ],
-        )
-        suggestion_text = st.text_area(
-            "建議內容：",
-            placeholder="請詳細描述您的建議或遇到問題...",
-        )
-
-        submit_sug = st.form_submit_button("🚀 送出建議")
-
-        if submit_sug:
-            if suggestion_text.strip():
-                sug_data = {
-                    "user_id": (
-                        st.session_state.user_info["username"]
-                        if st.session_state.user_info
-                        else "guest"
-                    ),
-                    "user_email": user_email_input,
-                    "suggestion_type": suggestion_type,
-                    "content": suggestion_text,
-                    "timestamp": datetime.datetime.now().isoformat(),
-                }
-                try:
-                    supabase.from_("suggestions").insert(sug_data).execute()
-                    st.success("🎉 感謝您的寶貴建議，已成功送出！")
-                except Exception as e:
-                    st.error(f"送出失敗：{e}")
-            else:
-                st.warning("請填寫建議內容再送出。")
+        ### 系統特色
+        1. **正詞法與音系約束**：採用達悟語專屬羅馬字拼音規則，自動關閉瀏覽器拼字檢查以提供最佳輸入體驗。
+        2. **嚴謹引用機制**：AI 生成回應時，強制比對與引用合規參考語料庫，確保語法與文化情境精確。
+        3. **社群共同驗證**：引入眾包（Crowdsourcing）評估與投票機制，收集在地部落族人經驗，持續優化開放語料庫。
+        """
+    )
