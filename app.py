@@ -14,7 +14,7 @@ import streamlit as st
 from supabase import Client, create_client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-1.5-flash"  # 已修正為正確的 Gemini 模型名稱
+MODEL_NAME = "gemini-3.6-flash"  # 已修正為正確的 Gemini 模型名稱
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
