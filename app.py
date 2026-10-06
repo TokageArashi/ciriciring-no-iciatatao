@@ -11,11 +11,17 @@ import google.generativeai as genai
 from gtts import gTTS
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import Client, create_client
 
-import streamlit.components.v1 as components
+# --- 1. 全域設定與 Supabase 連線 ---
+MODEL_NAME = "gemini-3.6-flash"  # 已修正為正確的 Gemini 模型名稱
 
-# 自動將頁面上所有 input 與 textarea 標籤的 spellcheck 屬性設為 false
+st.set_page_config(
+    page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
+)
+
+# 嵌入 JavaScript：自動將頁面上所有 input 與 textarea 標籤的 spellcheck 屬性設為 false
 components.html(
     """
     <script>
@@ -28,13 +34,6 @@ components.html(
     height=0,
 )
 
-# --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"  # 已修正為正確的 Gemini 模型名稱
-
-st.set_page_config(
-    page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
-)
-
 st.markdown(
     """
     <style>
@@ -42,9 +41,9 @@ st.markdown(
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
     /* 關閉輸入框與文字區域的拼字檢查紅線 */
-input, textarea {
-    spellcheck: false !important;
-}
+    input, textarea {
+        spellcheck: false !important;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -613,7 +612,7 @@ if main_menu == "miAI ko 我要用AI":
                 )
 
                 # 1. 修正問題 (句子 1)
-                st.markdown("##### ✏️ 修正【句子 1 - 問題】")
+                st.markdown("##### ✏️️ 修正【句子 1 - 問題】")
                 e_q_tao = st.text_input(
                     "修改句子 1 達悟語：",
                     value=ai_data.get("user_recognized_tao", q_orig),
