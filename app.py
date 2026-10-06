@@ -184,6 +184,10 @@ def generate_tts_bytes(text):
 
 
 # --- 5. AI 處理邏輯 ---
+import time
+from google.api_core.exceptions import ResourceExhausted
+
+
 def process_ai_input(text_prompt=None, audio_file=None):
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
         "GOOGLE_API_KEY"
@@ -195,7 +199,54 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    legal_corpus = []
+    # ...（前面的語料庫讀取邏輯保持不變）...
+
+    contents = [system_prompt]
+
+    if audio_file is not None:
+        try:
+            audio_bytes = get_bytes_from_input(audio_file)
+            mime_type = getattr(audio_file, "type", "audio/wav")
+            contents.append({"mime_type": mime_type, "data": audio_bytes})
+            contents.append(
+                "請對照【唯一合規參考語料庫】進行語音轉寫與回應。"
+            )
+        except Exception as e:
+            st.error(f"讀取錄音檔失敗：{e}")
+            return None
+    elif text_prompt:
+        contents.append(f"使用者輸入文字：{text_prompt}")
+    else:
+        return None
+
+    # 加入自動重試機制 (重試最多 3 次)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(
+                contents,
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.0,
+                },
+            )
+            return json.loads(response.text)
+        except ResourceExhausted:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5  # 每次等待 5 秒、10 秒...
+                st.warning(
+                    f"⏳ API 請求太過頻繁，正在等待 {wait_time} 秒後重試..."
+                )
+                time.sleep(wait_time)
+            else:
+                st.error(
+                    "❌ 請求過於頻繁（超出免費層每分鐘 5 次限制），請稍後 30"
+                    " 秒再試。"
+                )
+                return None
+        except Exception as e:
+            st.error(f"❌ AI 辨識失敗：{e}")
+            return None
 
     # 1. 從 corpus 讀取官方語料
     try:
