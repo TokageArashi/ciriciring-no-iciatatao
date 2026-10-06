@@ -26,6 +26,10 @@ st.markdown(
     div[role='radiogroup'] label { font-size: 20px !important; font-weight: bold !important; padding: 5px !important; }
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
+    /* 關閉輸入框與文字區域的拼字檢查紅線 */
+input, textarea {
+    spellcheck: false !important;
+}
     </style>
 """,
     unsafe_allow_html=True,
