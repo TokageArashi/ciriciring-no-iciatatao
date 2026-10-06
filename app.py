@@ -14,6 +14,14 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
+# --- 輔助函式 ---
+def lower_first_char(text: str) -> str:
+    """將字串的第一個字元轉為小寫"""
+    if not text:
+        return text
+    return text[0].lower() + text[1:]
+
+
 # --- 1. 全域設定與 Supabase 連線 ---
 MODEL_NAME = "gemini-3.6-flash"  # Gemini 模型名稱
 
@@ -644,7 +652,7 @@ if main_menu == "miAI ko 我要用AI":
 
             elif eval_choice == "錯誤":
                 st.warning(
-                    "⚠️️ 發現錯誤。您可以修正文字、語音與參考資料來源："
+                    "⚠ 發現錯誤。您可以修正文字、語音與參考資料來源："
                 )
 
                 # 1. 修正問題 (句子 1)
@@ -806,7 +814,7 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                     current_username == owner_id or current_username == "admin"
                 ):
                     if st.button(
-                        f"🗑️️ 刪除此筆資料 (ID #{f_id})", key=f"del_{f_id}"
+                        f"🗑 刪除此筆資料 (ID #{f_id})", key=f"del_{f_id}"
                     ):
                         success, msg = delete_feedback_item(
                             f_id, current_username
@@ -957,10 +965,15 @@ elif main_menu == "amian so AI ori 關於本站":
                         if st.session_state.user_info
                         else "guest"
                     ),
-                    "email": user_email_input,
-                    "category": suggestion_type,
+                    "user_email": user_email_input,
+                    "suggestion_type": suggestion_type,
                     "content": suggestion_text,
                     "timestamp": datetime.datetime.now().isoformat(),
                 }
-                supabase.from_("site_suggestions").insert(sug_data).execute()
-                st.success("🎉 建議已成功送出！")
+                try:
+                    supabase.from_("suggestions").insert(sug_data).execute()
+                    st.success("🎉 感謝您的寶貴建議，已成功送出！")
+                except Exception as e:
+                    st.error(f"送出失敗：{e}")
+            else:
+                st.warning("請填寫建議內容再送出。")
