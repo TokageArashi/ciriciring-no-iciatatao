@@ -3,8 +3,10 @@ import hashlib
 import io
 import json
 import os
+import time
 import uuid
 
+from google.api_core.exceptions import ResourceExhausted
 import google.generativeai as genai
 from gtts import gTTS
 import pandas as pd
@@ -12,7 +14,7 @@ import streamlit as st
 from supabase import Client, create_client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-1.5-flash"  # 已修正為正確的 Gemini 模型名稱
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -173,7 +175,7 @@ def generate_tts_bytes(text):
     if not text:
         return None
     try:
-        # 已設定為 Tagalog (tl) 塔加祿語
+        # 設定為 Tagalog (tl) 塔加祿語
         tts = gTTS(text=text, lang="tl", slow=False)
         fp = io.BytesIO()
         tts.write_to_fp(fp)
@@ -183,11 +185,7 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 5. AI 處理邏輯 ---
-import time
-from google.api_core.exceptions import ResourceExhausted
-
-
+# --- 5. AI 處理邏輯 (已修復結構與變數順序) ---
 def process_ai_input(text_prompt=None, audio_file=None):
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
         "GOOGLE_API_KEY"
@@ -199,54 +197,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    # ...（前面的語料庫讀取邏輯保持不變）...
-
-    contents = [system_prompt]
-
-    if audio_file is not None:
-        try:
-            audio_bytes = get_bytes_from_input(audio_file)
-            mime_type = getattr(audio_file, "type", "audio/wav")
-            contents.append({"mime_type": mime_type, "data": audio_bytes})
-            contents.append(
-                "請對照【唯一合規參考語料庫】進行語音轉寫與回應。"
-            )
-        except Exception as e:
-            st.error(f"讀取錄音檔失敗：{e}")
-            return None
-    elif text_prompt:
-        contents.append(f"使用者輸入文字：{text_prompt}")
-    else:
-        return None
-
-    # 加入自動重試機制 (重試最多 3 次)
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = model.generate_content(
-                contents,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0.0,
-                },
-            )
-            return json.loads(response.text)
-        except ResourceExhausted:
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5  # 每次等待 5 秒、10 秒...
-                st.warning(
-                    f"⏳ API 請求太過頻繁，正在等待 {wait_time} 秒後重試..."
-                )
-                time.sleep(wait_time)
-            else:
-                st.error(
-                    "❌ 請求過於頻繁（超出免費層每分鐘 5 次限制），請稍後 30"
-                    " 秒再試。"
-                )
-                return None
-        except Exception as e:
-            st.error(f"❌ AI 辨識失敗：{e}")
-            return None
+    legal_corpus = []
 
     # 1. 從 corpus 讀取官方語料
     try:
@@ -327,18 +278,31 @@ def process_ai_input(text_prompt=None, audio_file=None):
     else:
         return None
 
-    try:
-        response = model.generate_content(
-            contents,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.0,
-            },
-        )
-        return json.loads(response.text)
-    except Exception as e:
-        st.error(f"❌ AI 辨識失敗：{e}")
-        return None
+    # 自動重試機制
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(
+                contents,
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.0,
+                },
+            )
+            return json.loads(response.text)
+        except ResourceExhausted:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5
+                st.warning(
+                    f"⏳ API 請求太過頻繁，正在等待 {wait_time} 秒後重試..."
+                )
+                time.sleep(wait_time)
+            else:
+                st.error("❌ 請求過於頻繁（超出限制），請稍後再試。")
+                return None
+        except Exception as e:
+            st.error(f"❌ AI 辨識失敗：{e}")
+            return None
 
 
 # --- 6. 側邊欄：登入與註冊 ---
@@ -619,8 +583,7 @@ if main_menu == "miAI ko 我要用AI":
                         is_error=False,
                     ):
                         st.success(
-                            "🎉 語料與語音檔已成功寫入 Supabase"
-                            " 雲端資料庫！"
+                            "🎉 語料與語音檔已成功寫入 Supabase 雲端資料庫！"
                         )
                         del st.session_state.ai_data
                         st.rerun()
@@ -716,8 +679,7 @@ if main_menu == "miAI ko 我要用AI":
                         is_error=False,
                     ):
                         st.success(
-                            "🎉 修正版語料與更新後的語音檔已成功儲存至"
-                            " Supabase！"
+                            "🎉 修正版語料與更新後的語音檔已成功儲存至 Supabase！"
                         )
                         del st.session_state.ai_data
                         st.rerun()
@@ -746,9 +708,8 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
             else None
         )
 
-        # 使用 enumerate 取得當前列表中的顯示順序 (i)
         for i, row in enumerate(rows, start=1):
-            f_id = row["id"]  # 資料庫實際 ID，內部刪除/投票仍需使用此 ID
+            f_id = row["id"]
             owner_id = row.get("user_id", "匿名")
             region = row.get("region", "未知")
             is_edited = row.get("is_edited", 0)
@@ -759,7 +720,6 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                 else ("❌ 含有錯" if error_count > 0 else "✅ 原始產出")
             )
 
-            # 💡 將外層顯示名稱改為第 i 筆，並保留系統 ID 供對照
             with st.expander(
                 f"💬 對話 第 {i} 筆 (ID #{f_id}) | 上傳者：{owner_id} |"
                 f" 部落：{region} | 狀態：{status_tag}"
@@ -908,7 +868,6 @@ elif main_menu == "amian so AI ori 關於本站":
 歡迎多加利用與分享，共同為達悟語的數位保存與文化傳承盡一份心力！
 """)
 
-    # 於「關於本站」區塊新增修訂建議表單
     st.markdown("---")
     st.subheader("📝 提交網站修訂建議")
     with st.form(key="suggestion_form"):
@@ -950,9 +909,4 @@ elif main_menu == "amian so AI ori 關於本站":
                     "timestamp": datetime.datetime.now().isoformat(),
                 }
                 supabase.from_("site_suggestions").insert(sug_data).execute()
-                st.success(
-                    "🎉"
-                    " 感謝您的寶貴建議！我們將會認真評估並持續改進網站。"
-                )
-            else:
-                st.warning("請輸入建議內容後再送出。")
+                st.success("🎉 建議已成功送出！")
