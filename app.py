@@ -15,19 +15,38 @@ import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"  # 已修正為正確的 Gemini 模型名稱
+MODEL_NAME = "gemini-3.6-flash"  # Gemini 模型名稱
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
 )
 
-# 嵌入 JavaScript：自動將頁面上所有 input 與 textarea 標籤的 spellcheck 屬性設為 false
+# 嵌入 JavaScript：利用 MutationObserver 自動追蹤並動態關閉所有輸入框的拼字檢查
 components.html(
     """
     <script>
-        const inputs = parent.document.querySelectorAll('input, textarea');
-        inputs.forEach(input => {
-            input.setAttribute('spellcheck', 'false');
+        function disableSpellcheck() {
+            const inputs = parent.document.querySelectorAll('input, textarea');
+            inputs.forEach(input => {
+                input.setAttribute('spellcheck', 'false');
+                input.setAttribute('autocomplete', 'off');
+                input.setAttribute('autocorrect', 'off');
+                input.setAttribute('autocapitalize', 'off');
+            });
+        }
+
+        // 頁面首次載入時執行
+        disableSpellcheck();
+
+        // 建立 MutationObserver 監控 Streamlit 的動態 DOM 變化
+        const observer = new MutationObserver((mutations) => {
+            disableSpellcheck();
+        });
+
+        // 開始監聽整個 body 結構變化
+        observer.observe(parent.document.body, {
+            childList: true,
+            subtree: true
         });
     </script>
     """,
@@ -40,9 +59,11 @@ st.markdown(
     div[role='radiogroup'] label { font-size: 20px !important; font-weight: bold !important; padding: 5px !important; }
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
-    /* 關閉輸入框與文字區域的拼字檢查紅線 */
+    
+    /* 強制移除輸入框與文字區域的拼字檢查紅線外觀 */
     input, textarea {
         spellcheck: false !important;
+        -webkit-spellcheck: false !important;
     }
     </style>
 """,
@@ -203,7 +224,7 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 5. AI 處理邏輯 (已修復結構與變數順序) ---
+# --- 5. AI 處理邏輯 ---
 def process_ai_input(text_prompt=None, audio_file=None):
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
         "GOOGLE_API_KEY"
@@ -248,7 +269,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
                     f"[15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
                 )
     except Exception as e:
-        st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
+        st.warning(f"⚠️️ 從 Supabase 讀取社群驗證語料提示：{e}")
 
     corpus_context = (
         "\n".join(legal_corpus)
@@ -608,11 +629,11 @@ if main_menu == "miAI ko 我要用AI":
 
             elif eval_choice == "錯誤":
                 st.warning(
-                    "⚠️ 發現錯誤。您可以修正文字、語音與參考資料來源："
+                    "⚠️️ 發現錯誤。您可以修正文字、語音與參考資料來源："
                 )
 
                 # 1. 修正問題 (句子 1)
-                st.markdown("##### ✏️️ 修正【句子 1 - 問題】")
+                st.markdown("##### ✏ 修正【句子 1 - 問題】")
                 e_q_tao = st.text_input(
                     "修改句子 1 達悟語：",
                     value=ai_data.get("user_recognized_tao", q_orig),
@@ -770,7 +791,7 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                     current_username == owner_id or current_username == "admin"
                 ):
                     if st.button(
-                        f"🗑️ 刪除此筆資料 (ID #{f_id})", key=f"del_{f_id}"
+                        f"🗑️️ 刪除此筆資料 (ID #{f_id})", key=f"del_{f_id}"
                     ):
                         success, msg = delete_feedback_item(
                             f_id, current_username
