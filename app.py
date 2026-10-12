@@ -43,15 +43,12 @@ components.html(
             });
         }
 
-        // 頁面首次載入時執行
         disableSpellcheck();
 
-        // 建立 MutationObserver 監控 Streamlit 的動態 DOM 變化
         const observer = new MutationObserver((mutations) => {
             disableSpellcheck();
         });
 
-        // 開始監聽整個 body 結構變化
         observer.observe(parent.document.body, {
             childList: true,
             subtree: true
@@ -68,7 +65,6 @@ st.markdown(
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
     
-    /* 強制移除輸入框與文字區域的拼字檢查紅線外觀 */
     input, textarea {
         spellcheck: false !important;
         -webkit-spellcheck: false !important;
@@ -236,7 +232,6 @@ def generate_tts_bytes(text):
 def fetch_legal_corpus():
     legal_corpus = []
 
-    # 1. 從 corpus 讀取官方語料
     try:
         res_corpus = supabase.from_("corpus").select("*").execute()
         for r in res_corpus.data:
@@ -246,7 +241,6 @@ def fetch_legal_corpus():
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
 
-    # 2. 獨立查詢 feedback 與 community_votes，並在 Python 端用字典統計票數
     try:
         res_feedback = (
             supabase.from_("feedback")
@@ -254,19 +248,19 @@ def fetch_legal_corpus():
             .eq("is_ready_for_ai", 1)
             .execute()
         )
-        res_votes = supabase.from_("community_votes").select("feedback_id").execute()
+        res_votes = supabase.from_("community_votes").select("feedback_id, vote_result").execute()
 
-        # 建立統計票數的字典 {feedback_id: vote_count}
         vote_counts = {}
         if res_votes.data:
             for v in res_votes.data:
                 fid = v.get("feedback_id")
-                if fid is not None:
+                result = v.get("vote_result")
+                # 只有投「正確」的才計入合規門檻
+                if fid is not None and result == "正確":
                     vote_counts[fid] = vote_counts.get(fid, 0) + 1
 
         for r in res_feedback.data:
             f_id = r.get("id")
-            # 檢查票數是否大於或等於 15 票
             if vote_counts.get(f_id, 0) >= 15:
                 legal_corpus.append(
                     f"[Feedback 15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
@@ -752,9 +746,8 @@ if main_menu == "miAI ko 我要用AI":
                         st.rerun()
 
 elif main_menu == "manita so tao a miAI 看別人用AI":
-    st.subheader("👥 社群驗證與語料檢視")
+    st.subheader("👥 社群驗證與方言差統計檢視")
     try:
-        # 分開查詢 feedback 與 community_votes 避免關聯快取錯誤
         res_feedback = (
             supabase.from_("feedback")
             .select("*")
@@ -766,7 +759,6 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
         feedbacks = res_feedback.data if res_feedback.data else []
         votes_data = res_votes.data if res_votes.data else []
 
-        # 透過字典將票數與投票人按 feedback_id 進行分組統計
         votes_map = {}
         for v in votes_data:
             fid = v.get("feedback_id")
@@ -788,6 +780,10 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                 fb_votes = votes_map.get(fb_id, [])
                 vote_count = len(fb_votes)
 
+                # 統計贊同與不贊同票數
+                agree_count = sum(1 for v in fb_votes if v.get("vote_result") == "贊同")
+                disagree_count = sum(1 for v in fb_votes if v.get("vote_result") == "不贊同")
+
                 user_voted = any(
                     v.get("voter_id") == current_user for v in fb_votes
                 )
@@ -799,30 +795,76 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
 
                     with col_info:
                         st.write(f"**問（達悟語）：** {fb.get('q_original')}")
+                        if fb.get("q_audio_data"):
+                            try:
+                                q_bytes = bytes.fromhex(fb["q_audio_data"].replace("\\x", ""))
+                                st.audio(q_bytes, format=fb.get("q_audio_mime", "audio/wav"))
+                            except Exception:
+                                pass
+
                         st.write(f"**問（中文）：** {fb.get('q_trans')}")
                         st.write(f"**答（達悟語）：** {fb.get('tao_text')}")
+                        if fb.get("r_audio_data"):
+                            try:
+                                r_bytes = bytes.fromhex(fb["r_audio_data"].replace("\\x", ""))
+                                st.audio(r_bytes, format=fb.get("r_audio_mime", "audio/mp3"))
+                            except Exception:
+                                pass
+
                         st.write(f"**答（中文）：** {fb.get('zh_text')}")
                         st.write(
-                            f"**部落/背景：** {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}"
+                            f"**提供者背景：** {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}"
                         )
 
+                        # 顯示方言差統計細節（各投票者的部落分佈）
+                        if fb_votes:
+                            st.markdown("---")
+                            st.caption("📊 方言差與投票背景統計：")
+                            for v in fb_votes:
+                                r_voter = v.get("region", "未知部落")
+                                a_voter = v.get("age_group", "未知年齡")
+                                g_voter = v.get("gender", "未知性別")
+                                res_voter = v.get("vote_result", "未表態")
+                                sug_voter = v.get("hidden_suggestion", "")
+                                sug_text = f" (建議: {sug_voter})" if sug_voter else ""
+                                st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{sug_text}")
+
                     with col_action:
-                        st.metric("社群認同數", f"{vote_count} 票")
+                        st.metric("總投票數", f"{vote_count} 票")
+                        st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
 
                         if current_user:
                             if user_voted:
-                                st.success("已贊同")
+                                st.info("您已完成投票")
                             else:
-                                if st.button("👍 贊同 (+1)", key=f"vote_{fb_id}"):
+                                st.markdown("##### 🗳️ 參與評估")
+                                vote_choice = st.radio(
+                                    "選擇投票：",
+                                    ["贊同", "不贊同"],
+                                    key=f"v_choice_{fb_id}",
+                                    horizontal=True,
+                                )
+                                suggestion_input = st.text_area(
+                                    "選填建議說明：",
+                                    key=f"v_sug_{fb_id}",
+                                    placeholder="可輸入不同部落的慣用語法或修正意見...",
+                                )
+
+                                if st.button("送出投票紀錄", key=f"btn_vote_{fb_id}"):
                                     try:
-                                        supabase.from_("community_votes").insert(
-                                            {
-                                                "feedback_id": fb_id,
-                                                "voter_id": current_user,
-                                                "timestamp": datetime.datetime.now().isoformat(),
-                                            }
-                                        ).execute()
-                                        st.success("🎉 投票成功！")
+                                        voter_info = st.session_state.user_info
+                                        vote_record = {
+                                            "feedback_id": fb_id,
+                                            "voter_id": current_user,
+                                            "region": voter_info.get("region", "未知"),
+                                            "age_group": voter_info.get("age_group", "未知"),
+                                            "gender": voter_info.get("gender", "未知"),
+                                            "vote_result": vote_choice,
+                                            "hidden_suggestion": suggestion_input,
+                                            "timestamp": datetime.datetime.now().isoformat(),
+                                        }
+                                        supabase.from_("community_votes").insert(vote_record).execute()
+                                        st.success("🎉 投票與背景紀錄已儲存！")
                                         st.rerun()
                                     except Exception as err:
                                         st.error(f"投票失敗：{err}")
@@ -854,6 +896,6 @@ elif main_menu == "amian so AI ori 關於本站":
         ### 系統特色
         1. **正詞法與音系約束**：採用達悟語專屬羅馬字拼音規則，自動關閉瀏覽器拼字檢查以提供最佳輸入體驗。
         2. **嚴謹引用機制**：AI 生成回應時，強制比對與引用合規參考語料庫，確保語法與文化情境精確。
-        3. **社群共同驗證**：引入眾包（Crowdsourcing）評估與投票機制，收集在地部落族人經驗，持續優化開放語料庫。
+        3. **社群共同驗證與方言差分析**：引入眾包（Crowdsourcing）評估與投票機制，結合使用者部落、年齡與性別背景，記錄贊同與不贊同意見與改善建議，有助於後續的方言差比對與統計。
         """
     )
