@@ -222,7 +222,6 @@ def generate_tts_bytes(text):
     if not text:
         return None
     try:
-        # 設定為 Tagalog (tl) 塔加祿語
         tts = gTTS(text=text, lang="tl", slow=False)
         fp = io.BytesIO()
         tts.write_to_fp(fp)
@@ -232,7 +231,7 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 快取語料庫讀取 (設定 ttl 為 300 秒，避免每次 API 請求都重新撈取全表) ---
+# --- 快取語料庫讀取 (使用分離式查詢與 Python 字典統計票數，避開 PGRST200 錯誤) ---
 @st.cache_data(ttl=300)
 def fetch_legal_corpus():
     legal_corpus = []
@@ -247,18 +246,28 @@ def fetch_legal_corpus():
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
 
-    # 2. 優化 N+1 查詢：一次撈取 feedback 及其對應的投票數
+    # 2. 獨立查詢 feedback 與 community_votes，並在 Python 端用字典統計票數
     try:
         res_feedback = (
             supabase.from_("feedback")
-            .select("*, community_votes(id)")
+            .select("*")
             .eq("is_ready_for_ai", 1)
             .execute()
         )
+        res_votes = supabase.from_("community_votes").select("feedback_id").execute()
+
+        # 建立統計票數的字典 {feedback_id: vote_count}
+        vote_counts = {}
+        if res_votes.data:
+            for v in res_votes.data:
+                fid = v.get("feedback_id")
+                if fid is not None:
+                    vote_counts[fid] = vote_counts.get(fid, 0) + 1
+
         for r in res_feedback.data:
-            votes = r.get("community_votes", [])
-            if len(votes) >= 15:
-                f_id = r.get("id")
+            f_id = r.get("id")
+            # 檢查票數是否大於或等於 15 票
+            if vote_counts.get(f_id, 0) >= 15:
                 legal_corpus.append(
                     f"[Feedback 15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
                 )
@@ -298,7 +307,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 1. **強制引用原則**：你**必須**從【唯一合規參考語料庫】中，挑選出**至少 1 筆且最多 5 筆**最相關的語料作為參考資料。絕不能填寫「無參考資料」或留空。
 2. **相似度比對優先序**：
    - 優先搜尋：句意相似或包含相同字詞數最多的句子。
-   - 次要搜尋：若無完整匹配句子，請比對核心關鍵字（如核心動詞、名詞、主詞），忽略格位標記（o, no, do）或焦點標記。
+   - 次要搜尋：若無完整匹配句子，請比對核心關鍵字（如核心動詞, 名詞, 主詞），忽略格位標記（o, no, do）或焦點標記。
    - 備選方案：若完全找不到情境相同的句子，請挑選語法結構最接近，或包含共通單字的語料。
 3. **大小寫規範**：達悟語句子的句首字母**不需要大寫**，請統一保持為小寫。
 
@@ -656,7 +665,6 @@ if main_menu == "miAI ko 我要用AI":
                     "⚠ 發現錯誤。您可以修正文字、語音與參考資料來源："
                 )
 
-                # 1. 修正問題 (句子 1)
                 st.markdown("##### ✏ 修正【句子 1 - 問題】")
                 e_q_tao = st.text_input(
                     "修改句子 1 達悟語：",
@@ -676,7 +684,6 @@ if main_menu == "miAI ko 我要用AI":
                     key="edit_q_file",
                 )
 
-                # 2. 修正回應 (句子 2)
                 st.markdown("##### ✏️ 修正【句子 2 - 回應】")
                 e_r_tao = st.text_input(
                     "修改句子 2 達悟語：",
@@ -696,14 +703,12 @@ if main_menu == "miAI ko 我要用AI":
                     key="edit_r_file",
                 )
 
-                # 3. 修正參考資料
                 e_ref = st.text_input(
                     "修改【參考資料 / 語料來源】：",
                     value=ai_data.get("reference", ""),
                 )
 
                 if st.button("💾 儲存修正版至 Supabase"):
-                    # 處理問題語音檔
                     new_q_input = q_audio_rec or q_audio_file
                     if new_q_input:
                         final_q_bytes = get_bytes_from_input(new_q_input)
@@ -716,7 +721,6 @@ if main_menu == "miAI ko 我要用AI":
                             "audio/mp3" if final_q_bytes else None
                         )
 
-                    # 處理回應語音檔
                     new_r_input = r_audio_rec or r_audio_file
                     if new_r_input:
                         final_r_bytes = get_bytes_from_input(new_r_input)
@@ -729,7 +733,6 @@ if main_menu == "miAI ko 我要用AI":
                             "audio/mp3" if final_r_bytes else None
                         )
 
-                    # 寫入資料庫
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
@@ -751,13 +754,25 @@ if main_menu == "miAI ko 我要用AI":
 elif main_menu == "manita so tao a miAI 看別人用AI":
     st.subheader("👥 社群驗證與語料檢視")
     try:
-        res = (
+        # 分開查詢 feedback 與 community_votes 避免關聯快取錯誤
+        res_feedback = (
             supabase.from_("feedback")
-            .select("*, community_votes(id, voter_username)")
+            .select("*")
             .order("timestamp", desc=True)
             .execute()
         )
-        feedbacks = res.data
+        res_votes = supabase.from_("community_votes").select("*").execute()
+
+        feedbacks = res_feedback.data if res_feedback.data else []
+        votes_data = res_votes.data if res_votes.data else []
+
+        # 透過字典將票數與投票人按 feedback_id 進行分組統計
+        votes_map = {}
+        for v in votes_data:
+            fid = v.get("feedback_id")
+            if fid not in votes_map:
+                votes_map[fid] = []
+            votes_map[fid].append(v)
 
         if not feedbacks:
             st.info("目前尚無採集到的語料。")
@@ -769,8 +784,16 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
             )
 
             for fb in feedbacks:
+                fb_id = fb["id"]
+                fb_votes = votes_map.get(fb_id, [])
+                vote_count = len(fb_votes)
+
+                user_voted = any(
+                    v.get("voter_id") == current_user for v in fb_votes
+                )
+
                 with st.expander(
-                    f"📌 語料 ID #{fb['id']} - 由 {fb['user_id']} 提供 ({fb['timestamp'][:10]})"
+                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"
                 ):
                     col_info, col_action = st.columns([4, 1])
 
@@ -783,12 +806,6 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                             f"**部落/背景：** {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}"
                         )
 
-                    votes = fb.get("community_votes", [])
-                    vote_count = len(votes)
-                    user_voted = any(
-                        v.get("voter_username") == current_user for v in votes
-                    )
-
                     with col_action:
                         st.metric("社群認同數", f"{vote_count} 票")
 
@@ -796,27 +813,27 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                             if user_voted:
                                 st.success("已贊同")
                             else:
-                                if st.button(
-                                    "👍 贊同 (+1)", key=f"vote_{fb['id']}"
-                                ):
-                                    supabase.from_("community_votes").insert(
-                                        {
-                                            "feedback_id": fb["id"],
-                                            "voter_username": current_user,
-                                        }
-                                    ).execute()
-                                    st.rerun()
+                                if st.button("👍 贊同 (+1)", key=f"vote_{fb_id}"):
+                                    try:
+                                        supabase.from_("community_votes").insert(
+                                            {
+                                                "feedback_id": fb_id,
+                                                "voter_id": current_user,
+                                                "timestamp": datetime.datetime.now().isoformat(),
+                                            }
+                                        ).execute()
+                                        st.success("🎉 投票成功！")
+                                        st.rerun()
+                                    except Exception as err:
+                                        st.error(f"投票失敗：{err}")
 
-                            # 權限刪除檢查 (提供者本或 admin 均可刪除)
                             if (
                                 current_user == "admin"
                                 or fb.get("user_id") == current_user
                             ):
-                                if st.button(
-                                    "🗑️ 刪除", key=f"del_{fb['id']}"
-                                ):
+                                if st.button("🗑️ 刪除", key=f"del_{fb_id}"):
                                     ok, msg = delete_feedback_item(
-                                        fb["id"], current_user
+                                        fb_id, current_user
                                     )
                                     if ok:
                                         st.success(msg)
