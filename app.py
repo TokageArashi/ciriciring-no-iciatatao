@@ -462,7 +462,7 @@ with st.sidebar:
                     st.warning("帳號已被註冊。")
     else:
         u = st.session_state.user_info
-        st.success(f"登入身分：**{u['username']}**")
+        st.success(f"ngaran 登入身分：**{u['username']}**")
         if st.button("makowbot 🚪 登出"):
             st.session_state.user_info = None
             st.rerun()
@@ -567,7 +567,7 @@ if main_menu == "miAI ko / 我要用AI":
             if voice_input is not None:
                 if st.session_state.get("last_processed_audio") != voice_input:
                     with st.spinner(
-                        "⏳ 正在聽取語音並依達悟語音系轉寫中..."
+                        "⏳ 正在辨識..."
                     ):
                         audio_bytes = get_bytes_from_input(voice_input)
                         mime_type = getattr(
@@ -602,7 +602,7 @@ if main_menu == "miAI ko / 我要用AI":
             )
             if st.button("itoro do AI 發送文字詢問"):
                 if text_input.strip():
-                    with st.spinner("⏳ AI 思考與語音合成中..."):
+                    with st.spinner("⏳ AI 思考中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
                         if ai_data:
                             q_tts_bytes = generate_tts_bytes(
@@ -703,7 +703,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_error=False,
                     ):
                         st.success(
-                            "🎉 語料與語音檔已成功寫入 Supabase 雲端資料庫！"
+                            "🎉 已成功儲存！"
                         )
                         del st.session_state.ai_data
                         st.rerun()
@@ -757,7 +757,7 @@ if main_menu == "miAI ko / 我要用AI":
                     value=ai_data.get("reference", ""),
                 )
 
-                if st.button("voka 💾 儲存修正版至 Supabase"):
+                if st.button("voka 💾 儲存"):
                     new_q_input = q_audio_rec or q_audio_file
                     if new_q_input:
                         final_q_bytes = get_bytes_from_input(new_q_input)
@@ -796,7 +796,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=True,
                         is_error=True,
                     ):
-                        st.success("🎉 修正版語料與語音已成功更新至 Supabase 雲端資料庫！")
+                        st.success("🎉 已成功更新")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -909,7 +909,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                     with col_action:
                         st.markdown(dual_text("kapisirisiring", "總投票數"), unsafe_allow_html=True)
                         st.metric("總投票數", f"{vote_count} 票", label_visibility="collapsed")
-                        st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
+                        st.caption(f"👍 apiya 贊同: {agree_count} | 👎 beken 不贊同: {disagree_count}")
 
                         if current_user:
                             if user_voted:
@@ -918,7 +918,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                 st.markdown("##### 🗳️ 參與評估")
                                 vote_choice = st.radio(
                                     "選擇投票：",
-                                    ["贊同", "不贊同"],
+                                    ["apiya 贊同", "beken 不贊同"],
                                     key=f"v_choice_{fb_id}",
                                     horizontal=True,
                                 )
@@ -928,7 +928,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                     placeholder="可輸入不同部落的慣用語法或修正意見...",
                                 )
 
-                                if st.button("送出投票紀錄", key=f"btn_vote_{fb_id}"):
+                                if st.button("voka 送出", key=f"btn_vote_{fb_id}"):
                                     try:
                                         voter_info = st.session_state.user_info
                                         vote_record = {
@@ -942,7 +942,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                             "timestamp": datetime.datetime.now().isoformat(),
                                         }
                                         supabase.from_("community_votes").insert(vote_record).execute()
-                                        st.success("🎉 投票與背景紀錄已儲存！")
+                                        st.success("🎉 已儲存！")
                                         st.rerun()
                                     except Exception as err:
                                         st.error(f"投票失敗：{err}")
