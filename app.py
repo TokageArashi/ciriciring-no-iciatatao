@@ -907,7 +907,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                 st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{sug_text}")
 
                     with col_action:
-                        st.markdown(dual_text("總投票數", "總投票數"))
+                        st.markdown(dual_text("kapisirisiring", "總投票數"))
                         st.metric("總投票數", f"{vote_count} 票", label_visibility="collapsed")
                         st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
 
