@@ -14,7 +14,18 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
-# --- 輔助函式 ---
+# --- 輔助函式：上下雙語排版用 ---
+def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
+    """產生上方達悟文（稍大）、下方中文的雙語對照 HTML 結構"""
+    size_tao = "22px" if is_title else "18px"
+    size_zh = "16px" if is_title else "14px"
+    return f"""
+    <div style="margin-bottom: 8px;">
+        <div style="font-size: {size_tao}; font-weight: bold; color: #1E3A8A; line-height: 1.3;">{tao}</div>
+        <div style="font-size: {size_zh}; color: #4B5563; line-height: 1.2;">{zh}</div>
+    </div>
+    """
+
 def lower_first_char(text: str) -> str:
     """將字串的第一個字元轉為小寫"""
     if not text:
@@ -227,7 +238,7 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 快取語料庫讀取 (使用分離式查詢與 Python 字典統計票數，避開 PGRST200 錯誤) ---
+# --- 快取語料庫讀取 ---
 @st.cache_data(ttl=300)
 def fetch_legal_corpus():
     legal_corpus = []
@@ -255,8 +266,7 @@ def fetch_legal_corpus():
             for v in res_votes.data:
                 fid = v.get("feedback_id")
                 result = v.get("vote_result")
-                # 只有投「正確」的才計入合規門檻
-                if fid is not None and result == "正確":
+                if fid is not None and result == "贊同":
                     vote_counts[fid] = vote_counts.get(fid, 0) + 1
 
         for r in res_feedback.data:
@@ -376,14 +386,16 @@ if "user_info" not in st.session_state:
     st.session_state.user_info = None
 
 with st.sidebar:
-    st.title("👤 vahay do kararay 會員中心")
+    st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
     st.caption("☁️ 雲端資料庫已連線")
     if st.session_state.user_info is None:
         auth_choice = st.radio("請選擇：", ["登入", "註冊帳號"])
         if auth_choice == "登入":
-            login_username = st.text_input("帳號")
-            login_password = st.text_input("密碼", type="password")
-            if st.button("登入"):
+            st.markdown(dual_text("ngaran", "帳號"), unsafe_allow_html=True)
+            login_username = st.text_input("帳號輸入框", label_visibility="collapsed")
+            st.markdown(dual_text("kagi", "密碼"), unsafe_allow_html=True)
+            login_password = st.text_input("密碼輸入框", type="password", label_visibility="collapsed")
+            if st.button("somdep 登入"):
                 res = login_user(login_username, login_password)
                 if res:
                     st.session_state.user_info = {
@@ -397,11 +409,16 @@ with st.sidebar:
                 else:
                     st.error("帳號或密碼錯誤。")
         else:
-            new_u = st.text_input("設定帳號")
-            new_p = st.text_input("設定密碼", type="password")
-            new_e = st.text_input("信箱")
+            st.markdown(dual_text("ngaran", "設定帳號"), unsafe_allow_html=True)
+            new_u = st.text_input("設定帳號輸入框", label_visibility="collapsed")
+            st.markdown(dual_text("kagi", "設定密碼"), unsafe_allow_html=True)
+            new_p = st.text_input("設定密碼輸入框", type="password", label_visibility="collapsed")
+            st.markdown(dual_text("ivoka no teygami", "信箱"), unsafe_allow_html=True)
+            new_e = st.text_input("信箱輸入框", label_visibility="collapsed")
+            
+            st.markdown(dual_text("ili", "部落"), unsafe_allow_html=True)
             new_r = st.selectbox(
-                "ili 部落：",
+                "部落選擇",
                 [
                     "Jiyayo 椰油",
                     "Jiraralay 朗島",
@@ -413,9 +430,11 @@ with st.sidebar:
                     "Ji Taywan 台灣",
                     "ilaod 其他",
                 ],
+                label_visibility="collapsed"
             )
+            st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
             new_a = st.selectbox(
-                "kakawakawan 年齡：",
+                "年齡選擇",
                 [
                     "alikey 學齡前",
                     "kosiaw 國小",
@@ -428,12 +447,15 @@ with st.sidebar:
                     "71-80",
                     "ikaroa a ngernan o kakawakawan 81歲及以上",
                 ],
+                label_visibility="collapsed"
             )
+            st.markdown(dual_text("mikataretarek", "性別"), unsafe_allow_html=True)
             new_g = st.selectbox(
-                "mikataretarek 性別：",
+                "性別選擇",
                 ["mehakay 男", "mavakes 女", "ji nipanci 不公開"],
+                label_visibility="collapsed"
             )
-            if st.button("註冊"):
+            if st.button("mamareng 註冊"):
                 if add_user(new_u, new_p, new_e, new_r, new_a, new_g):
                     st.success("註冊成功，請切換登入。")
                 else:
@@ -441,26 +463,31 @@ with st.sidebar:
     else:
         u = st.session_state.user_info
         st.success(f"登入身分：**{u['username']}**")
-        if st.button("🚪 登出"):
+        if st.button("makowbot 🚪 登出"):
             st.session_state.user_info = None
             st.rerun()
 
 # --- 7. 主頁面區塊 ---
 main_menu = st.radio(
     "",
-    ["miAI ko 我要用AI", "manita so tao a miAI 看別人用AI", "amian so AI ori 關於本站"],
+    [
+        "miAI ko / 我要用AI", 
+        "manita so tao a miAI / 看別人用AI", 
+        "amian so AI ori / 關於本站"
+    ],
     horizontal=True,
 )
 
-if main_menu == "miAI ko 我要用AI":
-    st.subheader(
-        "💬 macisirisiring do AI kano misinsinmo so vakong no AI AI 對話與語音語料採集"
+if main_menu == "miAI ko / 我要用AI":
+    st.markdown(
+        dual_text("macisirisiring do AI kano misinsinmo so vakong no AI", "AI 對話與語音語料採集", is_title=True), 
+        unsafe_allow_html=True
     )
     if st.session_state.user_info is None:
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
     else:
         user = st.session_state.user_info
-        st.markdown("##### 📱 本次輸入者設定")
+        st.markdown(dual_text("mapacici so tao", "本次輸入者設定"))
         r_list = [
             "Jiyayo 椰油",
             "Jiraralay 朗島",
@@ -488,43 +515,51 @@ if main_menu == "miAI ko 我要用AI":
 
         c1, c2, c3 = st.columns(3)
         with c1:
+            st.markdown(dual_text("ili", "部落"), unsafe_allow_html=True)
             cur_r = st.selectbox(
-                "ili 部落：",
+                "ili",
                 r_list,
                 index=r_list.index(user["region"])
                 if user["region"] in r_list
                 else 0,
+                label_visibility="collapsed"
             )
         with c2:
+            st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
             cur_a = st.selectbox(
-                "kakawakawan 年齡：",
+                "kakawakawan",
                 a_list,
                 index=a_list.index(user["age_group"])
                 if user["age_group"] in a_list
                 else 3,
+                label_visibility="collapsed"
             )
         with c3:
+            st.markdown(dual_text("mikataretarek", "性別"), unsafe_allow_html=True)
             cur_g = st.selectbox(
-                "mikataretarek 性別：",
+                "mikataretarek",
                 g_list,
                 index=g_list.index(user["gender"])
                 if user["gender"] in g_list
                 else 0,
+                label_visibility="collapsed"
             )
         current_bg = {"region": cur_r, "age_group": cur_a, "gender": cur_g}
 
         st.divider()
 
+        st.markdown(dual_text("apen mo o pangap mo do vahey ta", "請選擇輸入方式"), unsafe_allow_html=True)
         input_type = st.radio(
-            "apen mo o pangap mo do vahey ta 請選擇輸入方式：",
-            ["🎤 koan ko 達悟語語音輸入", "⌨️ mivatvatek ko 文字輸入"],
+            "input_type_radio",
+            ["koan ko / 達悟語語音輸入", "mivatvatek ko / 文字輸入"],
             horizontal=True,
+            label_visibility="collapsed"
         )
 
-        if input_type == "🎤 koan ko 達悟語語音輸入":
-            st.caption(
-                "meypespes so maykevon oya, no teyka meyzezyak am teyka rana"
-                " 請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識："
+        if "koan ko" in input_type:
+            st.markdown(
+                dual_text("apisen o maykevon do teyrahem, no mateyka am teyka rana", "請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識"), 
+                unsafe_allow_html=True
             )
             voice_input = st.audio_input(
                 "mapalolo so ciring 開始錄音", key="voice_input_main"
@@ -560,11 +595,13 @@ if main_menu == "miAI ko 我要用AI":
                             st.rerun()
 
         else:
+            st.markdown(dual_text("mivatvatek", "請輸入"), unsafe_allow_html=True)
             text_input = st.text_input(
-                "manvood so teygami 請輸入：",
+                "text_input_box",
                 placeholder="例如：Akokay/今天天氣如何？",
+                label_visibility="collapsed"
             )
-            if st.button("🚀 itoro so teygami 發送文字詢問"):
+            if st.button("itoro do AI 發送文字詢問"):
                 if text_input.strip():
                     with st.spinner("⏳ AI 思考與語音合成中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
@@ -596,10 +633,15 @@ if main_menu == "miAI ko 我要用AI":
             bg_info = st.session_state.get("active_bg", current_bg)
 
             st.markdown("---")
-            st.info(
-                f"**【句子 1 - maniring o tao am 輸入與辨識】**\n* ciriciring no tao"
-                f" 辨識/mivaliw 原文：{ai_data.get('user_recognized_tao', q_orig)}\n*"
-                f" 翻譯：{ai_data.get('user_translation', '')}"
+            st.markdown(
+                f"""
+                <div style="background-color: #F0F4F8; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+                    <div style="font-size: 18px; font-weight: bold; color: #1E3A8A;">maniring o tao am (輸入與辨識)</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #1E3A8A; margin-top: 5px;">{ai_data.get('user_recognized_tao', q_orig)}</div>
+                    <div style="font-size: 14px; color: #4B5563;">{ai_data.get('user_translation', '')}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
             if st.session_state.get("user_audio_bytes"):
                 st.audio(
@@ -609,31 +651,44 @@ if main_menu == "miAI ko 我要用AI":
                     ),
                 )
 
-            st.success(
-                f"**【句子 2 - maniring o AI am AI 對話回答】**\n* ciriciring no tao"
-                f" 達悟(雅美)語：{ai_data.get('ai_reply_tao', '')}\n* mivaliw"
-                f" 中文對照：{ai_data.get('ai_reply_zh', '')}"
+            st.markdown(
+                f"""
+                <div style="background-color: #E6F4EA; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+                    <div style="font-size: 18px; font-weight: bold; color: #137333;">maniring o AI am (AI 對話回答)</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #137333; margin-top: 5px;">{ai_data.get('ai_reply_tao', '')}</div>
+                    <div style="font-size: 14px; color: #4B5563;">{ai_data.get('ai_reply_zh', '')}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
             if st.session_state.get("ai_audio_bytes"):
                 st.audio(
                     st.session_state.ai_audio_bytes, format="audio/mp3"
                 )
 
-            st.warning(
-                f"**【📚 參考資料 / 語料來源（上限 5 句）】**\n*"
-                f" {ai_data.get('reference', '未提供參考資料')}"
+            st.markdown(
+                f"""
+                <div style="background-color: #FEF7E0; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+                    <div style="font-size: 18px; font-weight: bold; color: #B06000;">o pakaaranan no ciring (參考資料 / 語料來源)</div>
+                    <div style="font-size: 16px; font-weight: bold; color: #B06000; margin-top: 5px;">{ai_data.get('reference', '未提供參考資料')}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
             st.divider()
-            st.subheader("📝 語料品質評估")
+            st.markdown(dual_text("o kapakaapiya no ciring", "語料品質評估", is_title=True), unsafe_allow_html=True)
+            st.markdown(dual_text("ya apiya o niyawen kano mivaliw ya?", "這組 AI 辨識與翻譯是否正確？"), unsafe_allow_html=True)
+            
             eval_choice = st.radio(
-                "manakem mo o ipanci mo? 這組 AI 辨識與翻譯是否正確？",
-                ["正確", "錯誤"],
+                "eval_choice_radio",
+                ["apiya / 正確", "beken / 錯誤"],
                 horizontal=True,
+                label_visibility="collapsed"
             )
 
-            if eval_choice == "正確":
-                if st.button("✅ 直接送出儲存至 Supabase"):
+            if "apiya" in eval_choice:
+                if st.button("voka ✅ 直接送出儲存至 Supabase"):
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
@@ -654,55 +709,56 @@ if main_menu == "miAI ko 我要用AI":
                         del st.session_state.ai_data
                         st.rerun()
 
-            elif eval_choice == "錯誤":
-                st.warning(
-                    "⚠ 發現錯誤。您可以修正文字、語音與參考資料來源："
-                )
+            elif "beken" in eval_choice:
+                st.warning("⚠ 發現錯誤。您可以修正文字、語音與參考資料來源：")
 
-                st.markdown("##### ✏ 修正【句子 1 - 問題】")
+                st.markdown(dual_text("ablisan o pacici", "修正【問題】"))
                 e_q_tao = st.text_input(
                     "修改句子 1 達悟語：",
                     value=ai_data.get("user_recognized_tao", q_orig),
                 )
+                st.markdown(dual_text("ablisan o mivaliw no pacici", "修改問題翻譯"))
                 e_q_trans = st.text_input(
                     "修改句子 1 翻譯：",
                     value=ai_data.get("user_translation", ""),
                 )
 
                 q_audio_rec = st.audio_input(
-                    "🎤 重新錄製【問題語音】（選擇性）：", key="edit_q_rec"
+                    "mapalolo so ciring no pacici 🎤 重新錄製【問題語音】（選擇性）：", key="edit_q_rec"
                 )
                 q_audio_file = st.file_uploader(
-                    "📁 上傳【問題語音檔】（選擇性）：",
+                    "ipanta o izeziak do tyenaw 📁 上傳【語音檔】（選擇性）：",
                     type=["wav", "mp3", "m4a"],
                     key="edit_q_file",
                 )
 
-                st.markdown("##### ✏️ 修正【句子 2 - 回應】")
+                st.markdown(dual_text("ablisan o tovis", "修正【回應】"))
                 e_r_tao = st.text_input(
                     "修改句子 2 達悟語：",
                     value=ai_data.get("ai_reply_tao", ""),
                 )
+                st.markdown(dual_text("ablisan o mivaliw no tovis", "修改回應翻譯"))
                 e_r_zh = st.text_input(
                     "修改句子 2 翻譯：",
                     value=ai_data.get("ai_reply_zh", ""),
                 )
 
                 r_audio_rec = st.audio_input(
-                    "🎤 重新錄製【回應語音】（選擇性）：", key="edit_r_rec"
+                    "mapalolo so ciring no tovis 🎤 重新錄製【回應語音】（選擇性）：", key="edit_r_rec"
                 )
                 r_audio_file = st.file_uploader(
-                    "📁 上傳【回應語音檔】（選擇性）：",
+                    "ipanta ipanta o izeziak do tyenaw 📁 上傳【回應語音檔】（選擇性）：",
                     type=["wav", "mp3", "m4a"],
                     key="edit_r_file",
                 )
 
+                st.markdown(dual_text("ablisan o vakong no ciring", "修改【參考資料 / 語料來源】"))
                 e_ref = st.text_input(
                     "修改【參考資料 / 語料來源】：",
                     value=ai_data.get("reference", ""),
                 )
 
-                if st.button("💾 儲存修正版至 Supabase"):
+                if st.button("voka 💾 儲存修正版至 Supabase"):
                     new_q_input = q_audio_rec or q_audio_file
                     if new_q_input:
                         final_q_bytes = get_bytes_from_input(new_q_input)
@@ -745,8 +801,11 @@ if main_menu == "miAI ko 我要用AI":
                         del st.session_state.ai_data
                         st.rerun()
 
-elif main_menu == "manita so tao a miAI 看別人用AI":
-    st.subheader("👥 社群驗證與方言差統計檢視")
+elif main_menu == "manita so tao a miAI / 看別人用AI":
+    st.markdown(
+        dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與語料檢視", is_title=True), 
+        unsafe_allow_html=True
+    )
     try:
         res_feedback = (
             supabase.from_("feedback")
@@ -780,7 +839,6 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                 fb_votes = votes_map.get(fb_id, [])
                 vote_count = len(fb_votes)
 
-                # 統計贊同與不贊同票數
                 agree_count = sum(1 for v in fb_votes if v.get("vote_result") == "贊同")
                 disagree_count = sum(1 for v in fb_votes if v.get("vote_result") == "不贊同")
 
@@ -789,12 +847,21 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                 )
 
                 with st.expander(
-                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"
+                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]}"
                 ):
                     col_info, col_action = st.columns([4, 1])
 
                     with col_info:
-                        st.write(f"**問（達悟語）：** {fb.get('q_original')}")
+                        st.markdown(
+                            f"""
+                            <div style="background-color: #F8F9FA; padding: 10px; border-radius: 6px; margin-bottom: 8px;">
+                                <div style="font-size: 16px; font-weight: bold; color: #1E3A8A;">pacici (問)</div>
+                                <div style="font-size: 18px; font-weight: bold; color: #111; margin-top: 4px;">{fb.get('q_original')}</div>
+                                <div style="font-size: 14px; color: #555;">{fb.get('q_trans')}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
                         if fb.get("q_audio_data"):
                             try:
                                 q_bytes = bytes.fromhex(fb["q_audio_data"].replace("\\x", ""))
@@ -802,8 +869,16 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                             except Exception:
                                 pass
 
-                        st.write(f"**問（中文）：** {fb.get('q_trans')}")
-                        st.write(f"**答（達悟語）：** {fb.get('tao_text')}")
+                        st.markdown(
+                            f"""
+                            <div style="background-color: #F0FDF4; padding: 10px; border-radius: 6px; margin-bottom: 8px;">
+                                <div style="font-size: 16px; font-weight: bold; color: #137333;">tovis (答)</div>
+                                <div style="font-size: 18px; font-weight: bold; color: #111; margin-top: 4px;">{fb.get('tao_text')}</div>
+                                <div style="font-size: 14px; color: #555;">{fb.get('zh_text')}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
                         if fb.get("r_audio_data"):
                             try:
                                 r_bytes = bytes.fromhex(fb["r_audio_data"].replace("\\x", ""))
@@ -811,12 +886,15 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                             except Exception:
                                 pass
 
-                        st.write(f"**答（中文）：** {fb.get('zh_text')}")
-                        st.write(
-                            f"**提供者背景：** {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}"
+                        st.markdown(
+                            f"""
+                            <div style="font-size: 14px; color: #666; margin-top: 5px;">
+                                <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
                         )
 
-                        # 顯示方言差統計細節（各投票者的部落分佈）
                         if fb_votes:
                             st.markdown("---")
                             st.caption("📊 方言差與投票背景統計：")
@@ -830,12 +908,13 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                                 st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{sug_text}")
 
                     with col_action:
+                        st.markdown(dual_text("kapisirisiring", "社群認同數"))
                         st.metric("總投票數", f"{vote_count} 票")
                         st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
 
                         if current_user:
                             if user_voted:
-                                st.info("您已完成投票")
+                                st.markdown(dual_text("niapiya", "已贊同"))
                             else:
                                 st.markdown("##### 🗳️ 參與評估")
                                 vote_choice = st.radio(
@@ -873,7 +952,7 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
                                 current_user == "admin"
                                 or fb.get("user_id") == current_user
                             ):
-                                if st.button("🗑️ 刪除", key=f"del_{fb_id}"):
+                                if st.button("opas 🗑️ 刪除", key=f"del_{fb_id}"):
                                     ok, msg = delete_feedback_item(
                                         fb_id, current_user
                                     )
@@ -886,7 +965,7 @@ elif main_menu == "manita so tao a miAI 看別人用AI":
     except Exception as e:
         st.error(f"讀取社群資料失敗：{e}")
 
-elif main_menu == "amian so AI ori 關於本站":
+elif main_menu == "amian so AI ori / 關於本站":
     st.subheader("🏝️ 關於 ciriciring no iciatatao (眾語)")
     st.markdown(
         """
