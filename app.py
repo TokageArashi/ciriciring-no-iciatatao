@@ -14,15 +14,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
-# --- 輔助函式：上下雙語排版用 ---
+# --- 輔助函式：上下雙語排版用（統一為標準顏色） ---
 def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
-    """產生上方達悟文（稍大）、下方中文的雙語對照 HTML 結構"""
+    """產生上方達悟文（稍大）、下方中文的雙語對照 HTML 結構，顏色統一"""
     size_tao = "22px" if is_title else "18px"
     size_zh = "16px" if is_title else "14px"
     return f"""
     <div style="margin-bottom: 8px;">
-        <div style="font-size: {size_tao}; font-weight: bold; color: #1E3A8A; line-height: 1.3;">{tao}</div>
-        <div style="font-size: {size_zh}; color: #4B5563; line-height: 1.2;">{zh}</div>
+        <div style="font-size: {size_tao}; font-weight: bold; color: #222222; line-height: 1.3;">{tao}</div>
+        <div style="font-size: {size_zh}; color: #555555; line-height: 1.2;">{zh}</div>
     </div>
     """
 
@@ -487,7 +487,6 @@ if main_menu == "miAI ko / 我要用AI":
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
     else:
         user = st.session_state.user_info
-        st.markdown(dual_text("mapacici so tao", "本次輸入者設定"))
         r_list = [
             "Jiyayo 椰油",
             "Jiraralay 朗島",
@@ -635,10 +634,10 @@ if main_menu == "miAI ko / 我要用AI":
             st.markdown("---")
             st.markdown(
                 f"""
-                <div style="background-color: #F0F4F8; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
-                    <div style="font-size: 18px; font-weight: bold; color: #1E3A8A;">maniring o tao am (輸入與辨識)</div>
-                    <div style="font-size: 18px; font-weight: bold; color: #1E3A8A; margin-top: 5px;">{ai_data.get('user_recognized_tao', q_orig)}</div>
-                    <div style="font-size: 14px; color: #4B5563;">{ai_data.get('user_translation', '')}</div>
+                <div style="background-color: #F8F9FA; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #E5E7EB;">
+                    <div style="font-size: 18px; font-weight: bold; color: #222222;">maniring o tao am (輸入與辨識)</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #222222; margin-top: 5px;">{ai_data.get('user_recognized_tao', q_orig)}</div>
+                    <div style="font-size: 14px; color: #555555;">{ai_data.get('user_translation', '')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -653,10 +652,10 @@ if main_menu == "miAI ko / 我要用AI":
 
             st.markdown(
                 f"""
-                <div style="background-color: #E6F4EA; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
-                    <div style="font-size: 18px; font-weight: bold; color: #137333;">maniring o AI am (AI 對話回答)</div>
-                    <div style="font-size: 18px; font-weight: bold; color: #137333; margin-top: 5px;">{ai_data.get('ai_reply_tao', '')}</div>
-                    <div style="font-size: 14px; color: #4B5563;">{ai_data.get('ai_reply_zh', '')}</div>
+                <div style="background-color: #F8F9FA; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #E5E7EB;">
+                    <div style="font-size: 18px; font-weight: bold; color: #222222;">maniring o AI am (AI 對話回答)</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #222222; margin-top: 5px;">{ai_data.get('ai_reply_tao', '')}</div>
+                    <div style="font-size: 14px; color: #555555;">{ai_data.get('ai_reply_zh', '')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -668,9 +667,9 @@ if main_menu == "miAI ko / 我要用AI":
 
             st.markdown(
                 f"""
-                <div style="background-color: #FEF7E0; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
-                    <div style="font-size: 18px; font-weight: bold; color: #B06000;">o pakaaranan no ciring (參考資料 / 語料來源)</div>
-                    <div style="font-size: 16px; font-weight: bold; color: #B06000; margin-top: 5px;">{ai_data.get('reference', '未提供參考資料')}</div>
+                <div style="background-color: #F8F9FA; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #E5E7EB;">
+                    <div style="font-size: 18px; font-weight: bold; color: #222222;">o pakaaranan no ciring (參考資料 / 語料來源)</div>
+                    <div style="font-size: 16px; font-weight: bold; color: #222222; margin-top: 5px;">{ai_data.get('reference', '未提供參考資料')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -847,17 +846,17 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 )
 
                 with st.expander(
-                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]}"
+                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"
                 ):
                     col_info, col_action = st.columns([4, 1])
 
                     with col_info:
                         st.markdown(
                             f"""
-                            <div style="background-color: #F8F9FA; padding: 10px; border-radius: 6px; margin-bottom: 8px;">
-                                <div style="font-size: 16px; font-weight: bold; color: #1E3A8A;">pacici (問)</div>
-                                <div style="font-size: 18px; font-weight: bold; color: #111; margin-top: 4px;">{fb.get('q_original')}</div>
-                                <div style="font-size: 14px; color: #555;">{fb.get('q_trans')}</div>
+                            <div style="background-color: #F8F9FA; padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid #E5E7EB;">
+                                <div style="font-size: 16px; font-weight: bold; color: #222222;">pacici (問)</div>
+                                <div style="font-size: 18px; font-weight: bold; color: #222222; margin-top: 4px;">{fb.get('q_original')}</div>
+                                <div style="font-size: 14px; color: #555555;">{fb.get('q_trans')}</div>
                             </div>
                             """,
                             unsafe_allow_html=True
@@ -871,10 +870,10 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
                         st.markdown(
                             f"""
-                            <div style="background-color: #F0FDF4; padding: 10px; border-radius: 6px; margin-bottom: 8px;">
-                                <div style="font-size: 16px; font-weight: bold; color: #137333;">tovis (答)</div>
-                                <div style="font-size: 18px; font-weight: bold; color: #111; margin-top: 4px;">{fb.get('tao_text')}</div>
-                                <div style="font-size: 14px; color: #555;">{fb.get('zh_text')}</div>
+                            <div style="background-color: #F8F9FA; padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid #E5E7EB;">
+                                <div style="font-size: 16px; font-weight: bold; color: #222222;">tovis (答)</div>
+                                <div style="font-size: 18px; font-weight: bold; color: #222222; margin-top: 4px;">{fb.get('tao_text')}</div>
+                                <div style="font-size: 14px; color: #555555;">{fb.get('zh_text')}</div>
                             </div>
                             """,
                             unsafe_allow_html=True
@@ -888,7 +887,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
                         st.markdown(
                             f"""
-                            <div style="font-size: 14px; color: #666; margin-top: 5px;">
+                            <div style="font-size: 14px; color: #555555; margin-top: 5px;">
                                 <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}
                             </div>
                             """,
@@ -908,8 +907,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                 st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{sug_text}")
 
                     with col_action:
-                        st.markdown(dual_text("kapisirisiring", "社群認同數"))
-                        st.metric("總投票數", f"{vote_count} 票")
+                        st.markdown(dual_text("總投票數", "總投票數"))
+                        st.metric("總投票數", f"{vote_count} 票", label_visibility="collapsed")
                         st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
 
                         if current_user:
