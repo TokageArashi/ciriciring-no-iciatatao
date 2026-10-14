@@ -313,7 +313,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
    - 優先搜尋：句意相似或包含相同字詞數最多的句子。
    - 次要搜尋：若無完整匹配句子，請比對核心關鍵字（如核心動詞, 名詞, 主詞），忽略格位標記（o, no, do）或焦點標記。
    - 備選方案：若完全找不到情境相同的句子，請挑選語法結構最接近，或包含共通單字的語料。
-3. **大小寫規範**：達悟語句子的句首字母**不需要大寫**，請統一保持為小寫。
+3. **大小寫規範**：達悟語句子的句首字母**不需要大寫**。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -389,8 +389,8 @@ with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
     st.caption("☁️ 雲端資料庫已連線")
     if st.session_state.user_info is None:
-        auth_choice = st.radio("請選擇：", ["登入", "註冊帳號"])
-        if auth_choice == "登入":
+        auth_choice = st.radio("請選擇：", ["somdep 登入", "mamareng 註冊帳號"])
+        if auth_choice == "somdep 登入":
             st.markdown(dual_text("ngaran", "帳號"), unsafe_allow_html=True)
             login_username = st.text_input("帳號輸入框", label_visibility="collapsed")
             st.markdown(dual_text("kagi", "密碼"), unsafe_allow_html=True)
