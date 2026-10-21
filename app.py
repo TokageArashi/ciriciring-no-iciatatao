@@ -238,20 +238,31 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 快取語料庫讀取 ---
+# --- 1. 全量快取與關鍵字檢索語料庫 ---
 @st.cache_data(ttl=300)
-def fetch_legal_corpus():
-    legal_corpus = []
+def load_all_raw_corpus():
+    """從 Supabase 撈取所有合規語料，並建立統一結構供關鍵字檢索使用"""
+    corpus_items = []
 
+    # 1. 撈取官方語料 corpus (包含來源 source)
     try:
         res_corpus = supabase.from_("corpus").select("*").execute()
         for r in res_corpus.data:
-            legal_corpus.append(
-                f"[Corpus 官方語料 ID #{r.get('id')}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('r_tao')} | 回應中文: {r.get('r_zh')}"
+            corpus_items.append(
+                {
+                    "id": f"Corpus 官方語料 ID #{r.get('id')}",
+                    "tao": r.get("q_original", ""),
+                    "zh": r.get("q_trans", ""),
+                    "r_tao": r.get("r_tao", ""),
+                    "r_zh": r.get("r_zh", ""),
+                    "source": r.get("source", "官方語料庫"),
+                    "full_text": f"{r.get('q_original', '')} {r.get('q_trans', '')} {r.get('r_tao', '')} {r.get('r_zh', '')}".lower(),
+                }
             )
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
 
+    # 2. 撈取 15 人驗證以上的社群語料 feedback
     try:
         res_feedback = (
             supabase.from_("feedback")
@@ -272,13 +283,58 @@ def fetch_legal_corpus():
         for r in res_feedback.data:
             f_id = r.get("id")
             if vote_counts.get(f_id, 0) >= 15:
-                legal_corpus.append(
-                    f"[Feedback 15人驗證語料 ID #{f_id}] 達悟語: {r.get('q_original')} | 中文: {r.get('q_trans')} | 回應達悟語: {r.get('tao_text')} | 回應中文: {r.get('zh_text')}"
+                corpus_items.append(
+                    {
+                        "id": f"Feedback 15人驗證語料 ID #{f_id}",
+                        "tao": r.get("q_original", ""),
+                        "zh": r.get("q_trans", ""),
+                        "r_tao": r.get("tao_text", ""),
+                        "r_zh": r.get("zh_text", ""),
+                        "source": f"社群驗證 (提供者: {r.get('user_id', '匿名')})",
+                        "full_text": f"{r.get('q_original', '')} {r.get('q_trans', '')} {r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
+                    }
                 )
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
 
-    return legal_corpus[-100:] if legal_corpus else []
+    return corpus_items
+
+
+def search_relevant_corpus(user_input, top_k=20):
+    """根據使用者輸入進行關鍵字索引比對，回傳最相關的 top_k 筆語料清單"""
+    all_corpus = load_all_raw_corpus()
+    if not all_corpus:
+        return []
+
+    if not user_input:
+        matched_items = all_corpus[-top_k:]
+    else:
+        clean_input = user_input.lower()
+        keywords = set(re.findall(r"\w+", clean_input))
+
+        scored_items = []
+        for item in all_corpus:
+            score = 0
+            for kw in keywords:
+                if kw in item["full_text"]:
+                    score += 1
+            if score > 0:
+                scored_items.append((score, item))
+
+        scored_items.sort(key=lambda x: x[0], reverse=True)
+        matched_items = [item for score, item in scored_items[:top_k]]
+
+        # 若無關鍵字命中，預設回傳最新的 top_k 筆
+        if not matched_items:
+            matched_items = all_corpus[-top_k:]
+
+    formatted_corpus = []
+    for r in matched_items:
+        formatted_corpus.append(
+            f"[{r['id']}] 出處: {r['source']} | 達悟語: {r['tao']} | 中文: {r['zh']} | 回應達悟語: {r['r_tao']} | 回應中文: {r['r_zh']}"
+        )
+
+    return formatted_corpus
 
 
 # --- 5. AI 處理邏輯 ---
@@ -293,7 +349,9 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    legal_corpus = fetch_legal_corpus()
+    # 執行關鍵字索引，抓取最相關的 20 筆語料
+    query_str = text_prompt if text_prompt else ""
+    legal_corpus = search_relevant_corpus(query_str, top_k=20)
 
     corpus_context = (
         "\n".join(legal_corpus)
@@ -304,7 +362,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。
 
-【唯一合規參考語料庫】:
+【唯一合規參考語料庫（已透過關鍵字索引篩選最相關內容）】:
 {corpus_context}
 
 【參考資料比對與引用規則（強制執行）】：
@@ -322,7 +380,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子（句首保持小寫）",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "必須列出至少 1 筆引用的完整句子與語料 ID（格式：[語料類型 ID #X] 句子...），並簡短說明比對到的關鍵字或關聯性"
+  "reference": "必須明確列出引用的完整參考句、達悟文、中文翻譯以及出處（格式範例：[ID] 出處: ... | 達悟語: ... | 中文: ...），並簡短說明比對到的關聯性"
 }}
 """
 
@@ -334,7 +392,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
             mime_type = getattr(audio_file, "type", "audio/wav")
             contents.append({"mime_type": mime_type, "data": audio_bytes})
             contents.append(
-                "請對照【唯一合規參考語料庫】進行語音轉寫與回應，並務必附上至少一筆參考資料。"
+                "請對照【唯一合規參考語料庫】進行語音轉寫與回應，並務必附上至少一筆包含達悟文、中文與出處的參考資料。"
             )
         except Exception as e:
             st.error(f"讀取錄音檔失敗：{e}")
