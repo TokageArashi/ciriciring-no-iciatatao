@@ -301,7 +301,7 @@ def load_all_raw_corpus():
 
 
 def search_relevant_corpus(user_input, top_k=20):
-    """根據使用者輸入進行關鍵字索引比對，回傳最相關的 top_k 筆語料清單"""
+    """強化的關鍵字與子字串索引檢索，確保包含完整字詞或核心關鍵字的句子絕對優先被撈出"""
     all_corpus = load_all_raw_corpus()
     if not all_corpus:
         return []
@@ -309,22 +309,29 @@ def search_relevant_corpus(user_input, top_k=20):
     if not user_input:
         matched_items = all_corpus[-top_k:]
     else:
-        clean_input = user_input.lower()
+        clean_input = user_input.lower().strip()
         keywords = set(re.findall(r"\w+", clean_input))
 
         scored_items = []
         for item in all_corpus:
             score = 0
+            # 1. 最高權重：如果使用者輸入的完整字串直接出現在語料中（例如完全命中 "yayo ka"）
+            if clean_input in item["full_text"]:
+                score += 100
+
+            # 2. 次要權重：計算單一關鍵字命中次數
             for kw in keywords:
                 if kw in item["full_text"]:
-                    score += 1
+                    score += 10
+
             if score > 0:
                 scored_items.append((score, item))
 
+        # 按比對分數由高到低排序
         scored_items.sort(key=lambda x: x[0], reverse=True)
         matched_items = [item for score, item in scored_items[:top_k]]
 
-        # 若無關鍵字命中，預設回傳最新的 top_k 筆
+        # 若完全沒有命中，備用方案：取出最新的 top_k 筆
         if not matched_items:
             matched_items = all_corpus[-top_k:]
 
