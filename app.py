@@ -359,7 +359,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
         else "【目前尚無合規的參考語料】"
     )
 
-system_prompt = f"""
+    system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。
 
 【唯一合規參考語料庫（已透過關鍵字索引篩選最相關內容）】:
@@ -377,9 +377,10 @@ system_prompt = f"""
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子（句首保持小寫）",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "必須明確列出引用的完整參考句、原始出處、達悟文以及語料庫中原本的中文翻譯（格式範例：[ID] 出處: ... | 達悟語: ko mateneng a meysega | 中文: 我很會畫圖），並簡短說明對應關係，絕對不可自行更改中文含意。"
+  "reference": "必須明確列出引用的完整參考句、原始出處、達悟文以及語料庫中原本的中文翻譯（格式範例：[ID] 出處: ... | 達悟語: ... | 中文: ...），並絕對不可自行更改中文含意。"
 }}
 """
+
     contents = [system_prompt]
 
     if audio_file is not None:
@@ -433,7 +434,6 @@ system_prompt = f"""
         except Exception as e:
             st.error(f"❌ AI 辨識失敗：{e}")
             return None
-
 
 # --- 6. 側邊欄：登入與註冊 ---
 if "user_info" not in st.session_state:
