@@ -344,7 +344,7 @@ def search_relevant_corpus(user_input, top_k=20):
     return formatted_corpus
 
 
-# --- 5. AI 處理邏輯 (嚴格字詞合規與標註機制) ---
+# --- 5. AI 處理邏輯 (字字對照與嚴格合規檢查) ---
 def process_ai_input(text_prompt=None, audio_file=None):
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
         "GOOGLE_API_KEY"
@@ -356,7 +356,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    # 執行關鍵字索引，抓取最相關的 20 筆語料
+    # 執行強化後的關鍵字/子字串檢索，抓取最相關的 20 筆語料
     query_str = text_prompt if text_prompt else ""
     legal_corpus = search_relevant_corpus(query_str, top_k=20)
 
@@ -369,26 +369,26 @@ def process_ai_input(text_prompt=None, audio_file=None):
     system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。
 
-【唯一合規參考語料庫】:
+【唯一合規參考語料庫（請從以下內容中尋找對應句子與詞彙）】:
 {corpus_context}
 
-【絕對強制規則 —— 字詞來源與標註規範（違者視為嚴重錯誤）】：
-1. **逐字合規檢查**：
-   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在【唯一合規參考語料庫】的文本中找到。
-   - 若句子中包含語料庫中找不到的字（或 AI 無中生有的字），該字**必須強制在後面加上標註 `[AI自創]`**（例如：`soci [AI自創]`）。絕對禁止未經標註就擅自創造新詞。
-2. **使用者自創字與異體字處理**：
-   - 當使用者輸入的句子中包含語料庫沒有的自創字或異體字時，請視為 `[使用者推薦]` 字詞。
-   - AI 可以在當次對話中彈性理解並適度回應，但在回應時若使用了該自創字，也必須標註 `[使用者推薦]`。該字在通過社群投票前，不得寫入標準官方語料庫。
-3. **嚴禁竄改參考翻譯**：引用的參考資料之中文翻譯必須完全照抄語料庫記錄，不得自行曲解。
+【絕對強制規則 —— 零幻覺與逐字合規檢查（違者視為嚴重錯誤）】：
+1. **逐字來源核對**：
+   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在上方【唯一合規參考語料庫】的內容中找到（例如：若要回答「是的」，必須直接使用語料庫中已出現過的「noon」，絕對禁止自創「eno」或任意拼湊）。
+   - 若語料庫中確實沒有該字，該字必須強制加上標註 `[AI自創]`。
+2. **使用者輸入與自創字處理**：
+   - 若使用者輸入了語料庫沒有的自創字或異體字，請在辨識結果中標註 `[使用者推薦]`。
+3. **強制引用與查驗**：
+   - 在 reference 欄位中，你必須明確寫出你引用了哪一筆語料庫的 ID、達悟文與中文，並確保你的回答是完全基於該筆語料。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
 {{
   "user_recognized_tao": "使用者輸入的達悟語或對照羅馬字（若有自創字請標註 [使用者推薦]）",
   "user_translation": "中文對照翻譯",
-  "ai_reply_tao": "達悟語回應句子（任何語料庫中沒有的字必須標註 [AI自創]）",
+  "ai_reply_tao": "達悟語回應句子（任何語料庫中找不到原字者必須標註 [AI自創]）",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "必須明確列出引用的完整參考句、出處、達悟文以及原文中文翻譯。"
+  "reference": "必須明確列出引用的完整參考句ID、出處、達悟文以及原文中文翻譯。"
 }}
 """
 
@@ -400,7 +400,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
             mime_type = getattr(audio_file, "type", "audio/wav")
             contents.append({"mime_type": mime_type, "data": audio_bytes})
             contents.append(
-                "請對照【唯一合規參考語料庫】進行語音轉寫與回應，並嚴格遵守未出現在語料庫中的字必須標註 [AI自創] 的規則。"
+                "請對照【唯一合規參考語料庫】進行語音轉寫與回應，確保每一個字都有跡可循。"
             )
         except Exception as e:
             st.error(f"讀取錄音檔失敗：{e}")
@@ -417,7 +417,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
                 contents,
                 generation_config={
                     "response_mime_type": "application/json",
-                    "temperature": 0.1,  # 降低隨機性，讓 AI 更嚴格遵守語料庫
+                    "temperature": 0.0,  # 溫度的設為 0，讓 AI 完全貼死語料庫，禁止任何自由發揮
                 },
             )
             result = json.loads(response.text)
@@ -445,10 +445,6 @@ def process_ai_input(text_prompt=None, audio_file=None):
         except Exception as e:
             st.error(f"❌ AI 辨識失敗：{e}")
             return None
-
-# --- 6. 側邊欄：登入與註冊 ---
-if "user_info" not in st.session_state:
-    st.session_state.user_info = None
 
 with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
