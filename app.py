@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import time
 import uuid
 
@@ -39,6 +40,10 @@ MODEL_NAME = "gemini-3.6-flash"  # Gemini 模型名稱
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
 )
+
+# 確保 Session State 安全初始化
+if "user_info" not in st.session_state:
+    st.session_state.user_info = None
 
 # 嵌入 JavaScript：利用 MutationObserver 自動追蹤並動態關閉所有輸入框的拼字檢查
 components.html(
@@ -238,13 +243,12 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 1. 全量快取與關鍵字檢索語料庫 ---
+# --- 快取語料庫與關鍵字檢索 ---
 @st.cache_data(ttl=300)
 def load_all_raw_corpus():
     """從 Supabase 撈取所有合規語料，並建立統一結構供關鍵字檢索使用"""
     corpus_items = []
 
-    # 1. 撈取官方語料 corpus (包含來源 source)
     try:
         res_corpus = supabase.from_("corpus").select("*").execute()
         for r in res_corpus.data:
@@ -262,7 +266,6 @@ def load_all_raw_corpus():
     except Exception as e:
         st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
 
-    # 2. 撈取 15 人驗證以上的社群語料 feedback
     try:
         res_feedback = (
             supabase.from_("feedback")
@@ -315,11 +318,9 @@ def search_relevant_corpus(user_input, top_k=20):
         scored_items = []
         for item in all_corpus:
             score = 0
-            # 1. 最高權重：如果使用者輸入的完整字串直接出現在語料中（例如完全命中 "yayo ka"）
             if clean_input in item["full_text"]:
                 score += 100
 
-            # 2. 次要權重：計算單一關鍵字命中次數
             for kw in keywords:
                 if kw in item["full_text"]:
                     score += 10
@@ -327,11 +328,9 @@ def search_relevant_corpus(user_input, top_k=20):
             if score > 0:
                 scored_items.append((score, item))
 
-        # 按比對分數由高到低排序
         scored_items.sort(key=lambda x: x[0], reverse=True)
         matched_items = [item for score, item in scored_items[:top_k]]
 
-        # 若完全沒有命中，備用方案：取出最新的 top_k 筆
         if not matched_items:
             matched_items = all_corpus[-top_k:]
 
@@ -344,7 +343,7 @@ def search_relevant_corpus(user_input, top_k=20):
     return formatted_corpus
 
 
-# --- 5. AI 處理邏輯 (字字對照與嚴格合規檢查) ---
+# --- 5. AI 處理邏輯 (字字對照與零幻覺強制規範) ---
 def process_ai_input(text_prompt=None, audio_file=None):
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
         "GOOGLE_API_KEY"
@@ -356,7 +355,6 @@ def process_ai_input(text_prompt=None, audio_file=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    # 執行強化後的關鍵字/子字串檢索，抓取最相關的 20 筆語料
     query_str = text_prompt if text_prompt else ""
     legal_corpus = search_relevant_corpus(query_str, top_k=20)
 
@@ -374,12 +372,12 @@ def process_ai_input(text_prompt=None, audio_file=None):
 
 【絕對強制規則 —— 零幻覺與逐字合規檢查（違者視為嚴重錯誤）】：
 1. **逐字來源核對**：
-   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在上方【唯一合規參考語料庫】的內容中找到（例如：若要回答「是的」，必須直接使用語料庫中已出現過的「noon」，絕對禁止自創「eno」或任意拼湊）。
-   - 若語料庫中確實沒有該字，該字必須強制加上標註 `[AI自創]`。
+   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在上方【唯一合規參考語料庫】的內容中找到（絕禁止將現成正確詞彙如 noon 自創竄改成 eno）。
+   - 若語料庫中確實找不到該字，該字必須強制加上標註 `[AI自創]`。
 2. **使用者輸入與自創字處理**：
    - 若使用者輸入了語料庫沒有的自創字或異體字，請在辨識結果中標註 `[使用者推薦]`。
 3. **強制引用與查驗**：
-   - 在 reference 欄位中，你必須明確寫出你引用了哪一筆語料庫的 ID、達悟文與中文，並確保你的回答是完全基於該筆語料。
+   - 在 reference 欄位中，你必須明確列出引用的完整參考句ID、出處、達悟文以及原文中文翻譯。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -417,7 +415,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
                 contents,
                 generation_config={
                     "response_mime_type": "application/json",
-                    "temperature": 0.0,  # 溫度的設為 0，讓 AI 完全貼死語料庫，禁止任何自由發揮
+                    "temperature": 0.0,
                 },
             )
             result = json.loads(response.text)
@@ -446,12 +444,14 @@ def process_ai_input(text_prompt=None, audio_file=None):
             st.error(f"❌ AI 辨識失敗：{e}")
             return None
 
+
+# --- 6. 側邊欄：登入與註冊 ---
 with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
     st.caption("☁️ 雲端資料庫已連線")
     if st.session_state.user_info is None:
-        auth_choice = st.radio("請選擇：", ["somdep 登入", "mamareng 註冊帳號"])
-        if auth_choice == "somdep 登入":
+        auth_choice = st.radio("請選擇：", ["登入", "註冊帳號"])
+        if auth_choice == "登入":
             st.markdown(dual_text("ngaran", "帳號"), unsafe_allow_html=True)
             login_username = st.text_input("帳號輸入框", label_visibility="collapsed")
             st.markdown(dual_text("kagi", "密碼"), unsafe_allow_html=True)
