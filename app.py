@@ -356,8 +356,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     model = genai.GenerativeModel(MODEL_NAME)
 
     query_str = text_prompt if text_prompt else ""
-    legal_corpus = search_relevant_corpus(query_str, top_k=20)
-
+    legal_corpus = search_relevant_corpus(query_str, top_k=3)
     corpus_context = (
         "\n".join(legal_corpus)
         if legal_corpus
