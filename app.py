@@ -343,7 +343,7 @@ def search_relevant_corpus(user_input, top_k=20):
     return formatted_corpus
 
 
-# --- 5. AI 處理邏輯 (字字對照與零幻覺強制規範) ---
+# --- 5. AI 處理邏輯 (具備指數退避與防 429 崩潰機制) ---
 def process_ai_input(text_prompt=None, audio_file=None):
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
         "GOOGLE_API_KEY"
@@ -372,7 +372,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 
 【絕對強制規則 —— 零幻覺與逐字合規檢查（違者視為嚴重錯誤）】：
 1. **逐字來源核對**：
-   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在上方【唯一合規參考語料庫】的內容中找到（絕禁止將現成正確詞彙如 noon 自創竄改成 eno）。
+   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在上方【唯一合規參考語料庫】的內容中找到。
    - 若語料庫中確實找不到該字，該字必須強制加上標註 `[AI自創]`。
 2. **使用者輸入與自創字處理**：
    - 若使用者輸入了語料庫沒有的自創字或異體字，請在辨識結果中標註 `[使用者推薦]`。
@@ -408,7 +408,8 @@ def process_ai_input(text_prompt=None, audio_file=None):
     else:
         return None
 
-    max_retries = 3
+    # 強化版自動重試機制（採用指數退避：等待 5秒、10秒、20秒、40秒）
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             response = model.generate_content(
@@ -432,18 +433,17 @@ def process_ai_input(text_prompt=None, audio_file=None):
             return result
         except ResourceExhausted:
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5
+                wait_time = 5 * (2 ** attempt)  # 5, 10, 20, 40 秒
                 st.warning(
-                    f"⏳ API 請求太過頻繁，正在等待 {wait_time} 秒後重試..."
+                    f"⏳ API 請求過於頻繁（429），系統正在等待 {wait_time} 秒後自動重試（第 {attempt + 1} 次）..."
                 )
                 time.sleep(wait_time)
             else:
-                st.error("❌ 請求過於頻繁（超出限制），請稍後再試。")
+                st.error("❌ 請求超出 API 配額限制（RPM/TPM 超標），請稍候約 1 分鐘後再試。")
                 return None
         except Exception as e:
             st.error(f"❌ AI 辨識失敗：{e}")
             return None
-
 
 # --- 6. 側邊欄：登入與註冊 ---
 with st.sidebar:
