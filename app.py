@@ -243,10 +243,10 @@ def generate_tts_bytes(text):
         return None
 
 
-# --- 快取語料庫與關鍵字檢索 ---
+# --- 5. 演算法檢索與語料庫快取 ---
 @st.cache_data(ttl=300)
 def load_all_raw_corpus():
-    """從 Supabase 撈取所有合規語料，並建立統一結構供關鍵字檢索使用"""
+    """從 Supabase 撈取所有合規語料，並建立統一結構供演算法檢索與統計使用"""
     corpus_items = []
 
     try:
@@ -303,8 +303,8 @@ def load_all_raw_corpus():
     return corpus_items
 
 
-def search_relevant_corpus(user_input, top_k=20):
-    """強化的關鍵字與子字串索引檢索，確保包含完整字詞或核心關鍵字的句子絕對優先被撈出"""
+def search_relevant_corpus(user_input, top_k=3):
+    """強化的關鍵字與子字串索引檢索"""
     all_corpus = load_all_raw_corpus()
     if not all_corpus:
         return []
@@ -343,11 +343,63 @@ def search_relevant_corpus(user_input, top_k=20):
     return formatted_corpus
 
 
-# --- 5. AI 處理邏輯 (具備指數退避與防 429 崩潰機制) ---
+def algorithm_first_processing(user_text):
+    """
+    純演算法優先處理（第一層）：
+    直接比對資料庫是否存在完全命中或高度匹配的雙語對照句型。
+    若存在，直接回傳演算法組合結果，完全不耗用 AI API Token。
+    """
+    if not user_text:
+        return None
+
+    all_corpus = load_all_raw_corpus()
+    clean_input = user_text.lower().strip()
+
+    # 1. 演算法完全命中比對
+    for item in all_corpus:
+        if clean_input == item["tao"].lower().strip() or clean_input == item["zh"].lower().strip():
+            return {
+                "user_recognized_tao": item["tao"],
+                "user_translation": item["zh"],
+                "ai_reply_tao": item["r_tao"],
+                "ai_reply_zh": item["r_zh"],
+                "reference": f"【純演算法直接匹配】{item['id']} 出處: {item['source']}",
+                "is_algorithm": True,
+            }
+
+    # 2. 演算法關鍵字組合比對
+    keywords = set(re.findall(r"\w+", clean_input))
+    best_item = None
+    max_matches = 0
+    for item in all_corpus:
+        matches = sum(1 for kw in keywords if kw in item["full_text"])
+        if matches > max_matches:
+            max_matches = matches
+            best_item = item
+
+    if best_item and max_matches >= 2:
+        return {
+            "user_recognized_tao": best_item["tao"],
+            "user_translation": best_item["zh"],
+            "ai_reply_tao": best_item["r_tao"],
+            "ai_reply_zh": best_item["r_zh"],
+            "reference": f"【純演算法權重匹配】{best_item['id']} 出處: {best_item['source']}",
+            "is_algorithm": True,
+        }
+
+    return None
+
+
+# --- 6. 雙軌邏輯：演算法為主，AI 備援為輔 ---
 def process_ai_input(text_prompt=None, audio_file=None):
-    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get(
-        "GOOGLE_API_KEY"
-    )
+    # 若為純文字輸入，優先交由演算法進行 0-Token 匹配
+    if text_prompt and audio_file is None:
+        algo_result = algorithm_first_processing(text_prompt)
+        if algo_result:
+            return algo_result
+
+    # 當演算法無法直接匹配（或為語音輸入）時，進入 AI 備援生成階段
+    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         st.error("❌ 找不到 GOOGLE_API_KEY，請檢查 Secrets 設定")
         return None
@@ -364,19 +416,19 @@ def process_ai_input(text_prompt=None, audio_file=None):
     )
 
     system_prompt = f"""
-你是一個達悟語（Yami/Tao）對話與翻譯助手。
+你是一個達悟語（Yami/Tao）對話與翻譯助手。目前系統處於「AI 備援生成」模式。
 
-【唯一合規參考語料庫（請從以下內容中尋找對應句子與詞彙）】:
+【唯一合規參考語料庫】:
 {corpus_context}
 
-【絕對強制規則 —— 零幻覺與逐字合規檢查（違者視為嚴重錯誤）】：
-1. **逐字來源核對**：
-   - AI 回應的達悟語句子（ai_reply_tao）中的**每一個單字**，都必須能在上方【唯一合規參考語料庫】的內容中找到。
-   - 若語料庫中確實找不到該字，該字必須強制加上標註 `[AI自創]`。
+【絕對強制規則 —— 零幻覺與逐字合規檢查】：
+1. **逐字來源核對與自創標註**：
+   - AI 回應的達悟語句子（ai_reply_tao）中的每一個單字，請優先從上方【唯一合規參考語料庫】挑選。
+   - 若概念為現代詞或語料庫中確實找不到對應詞彙，請根據達悟語借詞原則進行音譯，且該單字必須強制加上標註 `[AI自創]`（例如：soci [AI自創]）。
 2. **使用者輸入與自創字處理**：
    - 若使用者輸入了語料庫沒有的自創字或異體字，請在辨識結果中標註 `[使用者推薦]`。
 3. **強制引用與查驗**：
-   - 在 reference 欄位中，你必須明確列出引用的完整參考句ID、出處、達悟文以及原文中文翻譯。
+   - 在 reference 欄位中，必須明確寫出引用的參考句 ID 或標明「AI 備援組合生成」。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -385,7 +437,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
   "user_translation": "中文對照翻譯",
   "ai_reply_tao": "達悟語回應句子（任何語料庫中找不到原字者必須標註 [AI自創]）",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "必須明確列出引用的完整參考句ID、出處、達悟文以及原文中文翻譯。"
+  "reference": "必須明確列出引用的語料庫ID與出處，或說明備援對照。"
 }}
 """
 
@@ -407,8 +459,8 @@ def process_ai_input(text_prompt=None, audio_file=None):
     else:
         return None
 
-    # 強化版自動重試機制（採用指數退避：等待 5秒、10秒、20秒、40秒）
-    max_retries = 5
+    # 自動退避重試機制
+    max_retries = 3
     for attempt in range(max_retries):
         try:
             response = model.generate_content(
@@ -432,19 +484,20 @@ def process_ai_input(text_prompt=None, audio_file=None):
             return result
         except ResourceExhausted:
             if attempt < max_retries - 1:
-                wait_time = 5 * (2 ** attempt)  # 5, 10, 20, 40 秒
+                wait_time = 5 * (2 ** attempt)
                 st.warning(
-                    f"⏳ API 請求過於頻繁（429），系統正在等待 {wait_time} 秒後自動重試（第 {attempt + 1} 次）..."
+                    f"⏳ API 請求過於頻繁，系統正在等待 {wait_time} 秒後自動重試（第 {attempt + 1} 次）..."
                 )
                 time.sleep(wait_time)
             else:
-                st.error("❌ 請求超出 API 配額限制（RPM/TPM 超標），請稍候約 1 分鐘後再試。")
+                st.error("❌ 請求超出 API 配額限制，請稍候再試。")
                 return None
         except Exception as e:
-            st.error(f"❌ AI 辨識失敗：{e}")
+            st.error(f"❌ 辨識失敗：{e}")
             return None
 
-# --- 6. 側邊欄：登入與註冊 ---
+
+# --- 7. 側邊欄：登入與註冊 ---
 with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
     st.caption("☁️ 雲端資料庫已連線")
@@ -527,7 +580,7 @@ with st.sidebar:
             st.session_state.user_info = None
             st.rerun()
 
-# --- 7. 主頁面區塊 ---
+# --- 8. 主頁面區塊 ---
 main_menu = st.radio(
     "",
     [
@@ -540,7 +593,7 @@ main_menu = st.radio(
 
 if main_menu == "miAI ko / 我要用AI":
     st.markdown(
-        dual_text("macisirisiring do AI kano misinsinmo so vakong no AI", "AI 對話與語音語料採集", is_title=True), 
+        dual_text("macisirisiring do AI kano misinsinmo so vakong no AI", "演算法與 AI 備援對話語料採集", is_title=True), 
         unsafe_allow_html=True
     )
     if st.session_state.user_info is None:
@@ -626,29 +679,19 @@ if main_menu == "miAI ko / 我要用AI":
 
             if voice_input is not None:
                 if st.session_state.get("last_processed_audio") != voice_input:
-                    with st.spinner(
-                        "⏳ 正在辨識..."
-                    ):
+                    with st.spinner("⏳ 正在進行語音處理..."):
                         audio_bytes = get_bytes_from_input(voice_input)
-                        mime_type = getattr(
-                            voice_input, "type", "audio/wav"
-                        )
+                        mime_type = getattr(voice_input, "type", "audio/wav")
                         ai_data = process_ai_input(audio_file=voice_input)
 
                         if ai_data:
-                            r_tts_bytes = generate_tts_bytes(
-                                ai_data.get("ai_reply_tao")
-                            )
-                            st.session_state.active_q = ai_data.get(
-                                "user_recognized_tao", "語音輸入"
-                            )
+                            r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
+                            st.session_state.active_q = ai_data.get("user_recognized_tao", "語音輸入")
                             st.session_state.ai_data = ai_data
                             st.session_state.user_audio_bytes = audio_bytes
                             st.session_state.user_audio_mime = mime_type
                             st.session_state.ai_audio_bytes = r_tts_bytes
-                            st.session_state.ai_audio_mime = (
-                                "audio/mp3" if r_tts_bytes else None
-                            )
+                            st.session_state.ai_audio_mime = ("audio/mp3" if r_tts_bytes else None)
                             st.session_state.active_bg = current_bg
                             st.session_state.last_processed_audio = voice_input
                             st.rerun()
@@ -657,33 +700,23 @@ if main_menu == "miAI ko / 我要用AI":
             st.markdown(dual_text("mivatvatek", "請輸入"), unsafe_allow_html=True)
             text_input = st.text_input(
                 "text_input_box",
-                placeholder="例如：Akokay/今天天氣如何？",
+                placeholder="例如：Akokay / 今天天氣如何？",
                 label_visibility="collapsed"
             )
-            if st.button("itoro do AI 發送文字詢問"):
+            if st.button("itoro 發送查詢（演算法優先）"):
                 if text_input.strip():
-                    with st.spinner("⏳ AI 思考中..."):
+                    with st.spinner("⏳ 演算法檢索與備援處理中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
                         if ai_data:
-                            q_tts_bytes = generate_tts_bytes(
-                                ai_data.get(
-                                    "user_recognized_tao", text_input
-                                )
-                            )
-                            r_tts_bytes = generate_tts_bytes(
-                                ai_data.get("ai_reply_tao")
-                            )
+                            q_tts_bytes = generate_tts_bytes(ai_data.get("user_recognized_tao", text_input))
+                            r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
 
                             st.session_state.active_q = text_input
                             st.session_state.ai_data = ai_data
                             st.session_state.user_audio_bytes = q_tts_bytes
-                            st.session_state.user_audio_mime = (
-                                "audio/mp3" if q_tts_bytes else None
-                            )
+                            st.session_state.user_audio_mime = ("audio/mp3" if q_tts_bytes else None)
                             st.session_state.ai_audio_bytes = r_tts_bytes
-                            st.session_state.ai_audio_mime = (
-                                "audio/mp3" if r_tts_bytes else None
-                            )
+                            st.session_state.ai_audio_mime = ("audio/mp3" if r_tts_bytes else None)
                             st.session_state.active_bg = current_bg
 
         if "ai_data" in st.session_state and st.session_state.ai_data:
@@ -705,15 +738,13 @@ if main_menu == "miAI ko / 我要用AI":
             if st.session_state.get("user_audio_bytes"):
                 st.audio(
                     st.session_state.user_audio_bytes,
-                    format=st.session_state.get(
-                        "user_audio_mime", "audio/mp3"
-                    ),
+                    format=st.session_state.get("user_audio_mime", "audio/mp3"),
                 )
 
             st.markdown(
                 f"""
                 <div style="padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                    <div style="font-size: 18px; font-weight: bold;">maniring o AI am (AI 對話回答)</div>
+                    <div style="font-size: 18px; font-weight: bold;">maniring o AI/演算法 am (回應結果)</div>
                     <div style="font-size: 18px; font-weight: bold; margin-top: 5px;">{ai_data.get('ai_reply_tao', '')}</div>
                     <div style="font-size: 14px; opacity: 0.8;">{ai_data.get('ai_reply_zh', '')}</div>
                 </div>
@@ -721,9 +752,7 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
             if st.session_state.get("ai_audio_bytes"):
-                st.audio(
-                    st.session_state.ai_audio_bytes, format="audio/mp3"
-                )
+                st.audio(st.session_state.ai_audio_bytes, format="audio/mp3")
 
             st.markdown(
                 f"""
@@ -737,7 +766,7 @@ if main_menu == "miAI ko / 我要用AI":
 
             st.divider()
             st.markdown(dual_text("o kapakaapiya no ciring", "語料品質評估", is_title=True), unsafe_allow_html=True)
-            st.markdown(dual_text("ya apiya o niyawen kano mivaliw ya?", "這組 AI 辨識與翻譯是否正確？"), unsafe_allow_html=True)
+            st.markdown(dual_text("ya apiya o niyawen kano mivaliw ya?", "這組辨識與翻譯是否正確？"), unsafe_allow_html=True)
             
             eval_choice = st.radio(
                 "eval_choice_radio",
@@ -762,9 +791,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=False,
                         is_error=False,
                     ):
-                        st.success(
-                            "🎉 已成功儲存！"
-                        )
+                        st.success("🎉 已成功儲存！")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -821,26 +848,18 @@ if main_menu == "miAI ko / 我要用AI":
                     new_q_input = q_audio_rec or q_audio_file
                     if new_q_input:
                         final_q_bytes = get_bytes_from_input(new_q_input)
-                        final_q_mime = getattr(
-                            new_q_input, "type", "audio/wav"
-                        )
+                        final_q_mime = getattr(new_q_input, "type", "audio/wav")
                     else:
                         final_q_bytes = generate_tts_bytes(e_q_tao)
-                        final_q_mime = (
-                            "audio/mp3" if final_q_bytes else None
-                        )
+                        final_q_mime = ("audio/mp3" if final_q_bytes else None)
 
                     new_r_input = r_audio_rec or r_audio_file
                     if new_r_input:
                         final_r_bytes = get_bytes_from_input(new_r_input)
-                        final_r_mime = getattr(
-                            new_r_input, "type", "audio/wav"
-                        )
+                        final_r_mime = getattr(new_r_input, "type", "audio/wav")
                     else:
                         final_r_bytes = generate_tts_bytes(e_r_tao)
-                        final_r_mime = (
-                            "audio/mp3" if final_r_bytes else None
-                        )
+                        final_r_mime = ("audio/mp3" if final_r_bytes else None)
 
                     if save_語料_to_supabase(
                         st.session_state.user_info,
@@ -969,7 +988,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                     with col_action:
                         st.markdown(dual_text("kapisirisiring", "總投票數"), unsafe_allow_html=True)
                         st.metric("總投票數", f"{vote_count} 票", label_visibility="collapsed")
-                        st.caption(f"👍 apiya 贊同: {agree_count} | 👎 beken 不贊同: {disagree_count}")
+                        st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
 
                         if current_user:
                             if user_voted:
@@ -978,7 +997,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                 st.markdown("##### 🗳️ 參與評估")
                                 vote_choice = st.radio(
                                     "選擇投票：",
-                                    ["apiya 贊同", "beken 不贊同"],
+                                    ["贊同", "不贊同"],
                                     key=f"v_choice_{fb_id}",
                                     horizontal=True,
                                 )
@@ -988,7 +1007,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                     placeholder="可輸入不同部落的慣用語法或修正意見...",
                                 )
 
-                                if st.button("voka 送出", key=f"btn_vote_{fb_id}"):
+                                if st.button("送出投票紀錄", key=f"btn_vote_{fb_id}"):
                                     try:
                                         voter_info = st.session_state.user_info
                                         vote_record = {
@@ -1002,7 +1021,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                             "timestamp": datetime.datetime.now().isoformat(),
                                         }
                                         supabase.from_("community_votes").insert(vote_record).execute()
-                                        st.success("🎉 已儲存！")
+                                        st.success("🎉 投票與背景紀錄已儲存！")
                                         st.rerun()
                                     except Exception as err:
                                         st.error(f"投票失敗：{err}")
@@ -1029,7 +1048,7 @@ elif main_menu == "amian so AI ori / 關於本站":
     st.markdown(
         """
         ### 專案願景
-        本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合前沿大型語言模型（Gemini）與在地部落語料庫，建構即時雙向的語音與文字對話互動系統。
+        本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的語意與語音採集互動系統。
 
         ### 系統特色
         1. **正詞法與音系約束**：採用達悟語專屬羅馬字拼音規則，自動關閉瀏覽器拼字檢查以提供最佳輸入體驗。
