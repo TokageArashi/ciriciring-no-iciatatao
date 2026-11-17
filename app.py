@@ -1,6 +1,5 @@
 import datetime
 import hashlib
-import io
 import json
 import os
 import re
@@ -9,15 +8,14 @@ import uuid
 
 from google.api_core.exceptions import ResourceExhausted
 import google.generativeai as genai
-from gtts import gTTS
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
-# --- 輔助函式：上下雙語排版用（適應暗色/亮色模式的高對比顏色） ---
+# --- 輔助函式：上下雙語排版用 ---
 def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
-    """產生上方達悟文（稍大）、下方中文的雙語對照 HTML 結構，使用高對比顏色以支援暗色模式"""
+    """產生上方達悟文（稍大）、下方中文的雙語對照 HTML 結構"""
     size_tao = "22px" if is_title else "18px"
     size_zh = "16px" if is_title else "14px"
     return f"""
@@ -35,17 +33,16 @@ def lower_first_char(text: str) -> str:
 
 
 # --- 1. 全域設定與 Supabase 連線 ---
-MODEL_NAME = "gemini-3.6-flash"  # Gemini 模型名稱
+MODEL_NAME = "gemini-3.6-flash"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
 )
 
-# 確保 Session State 安全初始化
 if "user_info" not in st.session_state:
     st.session_state.user_info = None
 
-# 嵌入 JavaScript：利用 MutationObserver 自動追蹤並動態關閉所有輸入框的拼字檢查
+# 自動關閉拼字檢查
 components.html(
     """
     <script>
@@ -58,17 +55,9 @@ components.html(
                 input.setAttribute('autocapitalize', 'off');
             });
         }
-
         disableSpellcheck();
-
-        const observer = new MutationObserver((mutations) => {
-            disableSpellcheck();
-        });
-
-        observer.observe(parent.document.body, {
-            childList: true,
-            subtree: true
-        });
+        const observer = new MutationObserver(() => disableSpellcheck());
+        observer.observe(parent.document.body, { childList: true, subtree: true });
     </script>
     """,
     height=0,
@@ -80,11 +69,7 @@ st.markdown(
     div[role='radiogroup'] label { font-size: 20px !important; font-weight: bold !important; padding: 5px !important; }
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
-    
-    input, textarea {
-        spellcheck: false !important;
-        -webkit-spellcheck: false !important;
-    }
+    input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
     </style>
 """,
     unsafe_allow_html=True,
@@ -101,7 +86,6 @@ st.markdown(
 )
 
 
-# 初始化 Supabase
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["SUPABASE_URL"]
@@ -112,18 +96,20 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# --- 2. 會員機制 (使用 Supabase users 表) ---
+# --- 2. 會員機制 ---
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 
 def add_user(username, password, email, region, age_group, gender):
     try:
+        # region 若為列表，自動轉為逗號分隔字串
+        region_str = ", ".join(region) if isinstance(region, list) else region
         data = {
             "username": username,
             "password": make_hashes(password),
             "email": email,
-            "region": region,
+            "region": region_str,
             "age_group": age_group,
             "gender": gender,
             "created_at": datetime.datetime.now().isoformat(),
@@ -150,7 +136,7 @@ def login_user(username, password):
         return []
 
 
-# --- 3. Supabase 資料庫讀寫函式 ---
+# --- 3. Supabase 讀寫函式 ---
 def save_語料_to_supabase(
     user_info,
     bg_info,
@@ -160,16 +146,19 @@ def save_語料_to_supabase(
     q_mime,
     r_tao,
     r_zh,
-    r_audio_bytes,
-    r_mime,
+    r_audio_bytes=None,
+    r_mime=None,
     is_edited=False,
     is_error=False,
 ):
     try:
+        region_val = bg_info["region"]
+        region_str = ", ".join(region_val) if isinstance(region_val, list) else region_val
+
         data = {
             "user_id": user_info["username"],
             "user_email": user_info["email"],
-            "region": bg_info["region"],
+            "region": region_str,
             "age_group": bg_info["age_group"],
             "gender": bg_info["gender"],
             "q_original": q_orig,
@@ -219,7 +208,6 @@ def delete_feedback_item(feedback_id, current_username):
         return False, f"刪除失敗：{e}"
 
 
-# --- 4. 語音處理輔助函數 ---
 def get_bytes_from_input(audio_input):
     if not audio_input:
         return None
@@ -230,41 +218,24 @@ def get_bytes_from_input(audio_input):
     return audio_input
 
 
-def generate_tts_bytes(text):
-    if not text:
-        return None
-    try:
-        tts = gTTS(text=text, lang="tl", slow=False)
-        fp = io.BytesIO()
-        tts.write_to_fp(fp)
-        fp.seek(0)
-        return fp.read()
-    except Exception:
-        return None
-
-
-# --- 5. 演算法檢索與語料庫快取 ---
+# --- 5. 語料庫讀取與檢索 ---
 @st.cache_data(ttl=300)
 def load_all_raw_corpus():
-    """從 Supabase 撈取所有合規語料，並建立統一結構供演算法檢索與統計使用"""
     corpus_items = []
-
     try:
         res_corpus = supabase.from_("corpus").select("*").execute()
         for r in res_corpus.data:
             corpus_items.append(
                 {
-                    "id": f"Corpus 官方語料 ID #{r.get('id')}",
-                    "tao": r.get("q_original", ""),
-                    "zh": r.get("q_trans", ""),
-                    "r_tao": r.get("r_tao", ""),
-                    "r_zh": r.get("r_zh", ""),
+                    "id": f"Corpus ID #{r.get('id')}",
+                    "tao": r.get("tao_text", ""),
+                    "zh": r.get("zh_text", ""),
                     "source": r.get("source", "官方語料庫"),
-                    "full_text": f"{r.get('q_original', '')} {r.get('q_trans', '')} {r.get('r_tao', '')} {r.get('r_zh', '')}".lower(),
+                    "full_text": f"{r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
                 }
             )
     except Exception as e:
-        st.warning(f"⚠️ 從 Supabase 讀取 corpus 語料庫提示：{e}")
+        st.warning(f"⚠️ 讀取 3 欄位 corpus 語料庫提示：{e}")
 
     try:
         res_feedback = (
@@ -289,22 +260,19 @@ def load_all_raw_corpus():
                 corpus_items.append(
                     {
                         "id": f"Feedback 15人驗證語料 ID #{f_id}",
-                        "tao": r.get("q_original", ""),
-                        "zh": r.get("q_trans", ""),
-                        "r_tao": r.get("tao_text", ""),
-                        "r_zh": r.get("zh_text", ""),
+                        "tao": r.get("tao_text", ""),
+                        "zh": r.get("zh_text", ""),
                         "source": f"社群驗證 (提供者: {r.get('user_id', '匿名')})",
-                        "full_text": f"{r.get('q_original', '')} {r.get('q_trans', '')} {r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
+                        "full_text": f"{r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
                     }
                 )
     except Exception as e:
-        st.warning(f"⚠️ 從 Supabase 讀取社群驗證語料提示：{e}")
+        st.warning(f"⚠️ 讀取社群驗證語料提示：{e}")
 
     return corpus_items
 
 
 def search_relevant_corpus(user_input, top_k=3):
-    """強化的關鍵字與子字串索引檢索"""
     all_corpus = load_all_raw_corpus()
     if not all_corpus:
         return []
@@ -337,37 +305,30 @@ def search_relevant_corpus(user_input, top_k=3):
     formatted_corpus = []
     for r in matched_items:
         formatted_corpus.append(
-            f"[{r['id']}] 出處: {r['source']} | 達悟語: {r['tao']} | 中文: {r['zh']} | 回應達悟語: {r['r_tao']} | 回應中文: {r['r_zh']}"
+            f"[{r['id']}] 出處: {r['source']} | 達悟語: {r['tao']} | 中文: {r['zh']}"
         )
 
     return formatted_corpus
 
 
 def algorithm_first_processing(user_text):
-    """
-    純演算法優先處理（第一層）：
-    直接比對資料庫是否存在完全命中或高度匹配的雙語對照句型。
-    若存在，直接回傳演算法組合結果，完全不耗用 AI API Token。
-    """
     if not user_text:
         return None
 
     all_corpus = load_all_raw_corpus()
     clean_input = user_text.lower().strip()
 
-    # 1. 演算法完全命中比對
     for item in all_corpus:
         if clean_input == item["tao"].lower().strip() or clean_input == item["zh"].lower().strip():
             return {
                 "user_recognized_tao": item["tao"],
                 "user_translation": item["zh"],
-                "ai_reply_tao": item["r_tao"],
-                "ai_reply_zh": item["r_zh"],
-                "reference": f"【純演算法直接匹配】{item['id']} 出處: {item['source']}",
+                "ai_reply_tao": item["tao"],
+                "ai_reply_zh": item["zh"],
+                "reference": f"【純演算法完全匹配】{item['id']} 出處: {item['source']}",
                 "is_algorithm": True,
             }
 
-    # 2. 演算法關鍵字組合比對
     keywords = set(re.findall(r"\w+", clean_input))
     best_item = None
     max_matches = 0
@@ -381,8 +342,8 @@ def algorithm_first_processing(user_text):
         return {
             "user_recognized_tao": best_item["tao"],
             "user_translation": best_item["zh"],
-            "ai_reply_tao": best_item["r_tao"],
-            "ai_reply_zh": best_item["r_zh"],
+            "ai_reply_tao": best_item["tao"],
+            "ai_reply_zh": best_item["zh"],
             "reference": f"【純演算法權重匹配】{best_item['id']} 出處: {best_item['source']}",
             "is_algorithm": True,
         }
@@ -390,15 +351,13 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 6. 雙軌邏輯：演算法為主，AI 備援為輔 ---
+# --- 6. 雙軌邏輯 ---
 def process_ai_input(text_prompt=None, audio_file=None):
-    # 若為純文字輸入，優先交由演算法進行 0-Token 匹配
     if text_prompt and audio_file is None:
         algo_result = algorithm_first_processing(text_prompt)
         if algo_result:
             return algo_result
 
-    # 當演算法無法直接匹配（或為語音輸入）時，進入 AI 備援生成階段
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         st.error("❌ 找不到 GOOGLE_API_KEY，請檢查 Secrets 設定")
@@ -416,7 +375,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
     )
 
     system_prompt = f"""
-你是一個達悟語（Yami/Tao）對話與翻譯助手。目前系統處於「AI 備援生成」模式。
+你是一個達悟語（Yami/Tao）對話與翻譯助手。目前處於「AI 備援生成」模式。
 
 【唯一合規參考語料庫】:
 {corpus_context}
@@ -459,7 +418,6 @@ def process_ai_input(text_prompt=None, audio_file=None):
     else:
         return None
 
-    # 自動退避重試機制
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -497,6 +455,35 @@ def process_ai_input(text_prompt=None, audio_file=None):
             return None
 
 
+# --- 全域選項選單 ---
+REGION_OPTIONS = [
+    "Jiyayo 椰油",
+    "Jiraralay 朗島",
+    "Jiranmilek 東清",
+    "Jivalino 野銀",
+    "Jimowrod 紅頭",
+    "Jiratay 漁人",
+    "Ivatan 巴丹",
+    "Ji Taywan 台灣",
+    "ilaod 其他",
+]
+
+AGE_OPTIONS = [
+    "alikey 學齡前",
+    "kosiaw 國小",
+    "kocong aka kawcong 國高中",
+    "18-30",
+    "31-40",
+    "41-50",
+    "51-60",
+    "61-70",
+    "71-80",
+    "ikaroa a ngernan o kakawakawan 81歲及以上",
+]
+
+GENDER_OPTIONS = ["mehakay 男", "mavakes 女", "ji nipanci 不公開"]
+
+
 # --- 7. 側邊欄：登入與註冊 ---
 with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
@@ -529,47 +516,30 @@ with st.sidebar:
             st.markdown(dual_text("ivoka no teygami", "信箱"), unsafe_allow_html=True)
             new_e = st.text_input("信箱輸入框", label_visibility="collapsed")
             
-            st.markdown(dual_text("ili", "部落"), unsafe_allow_html=True)
-            new_r = st.selectbox(
+            # --- 註冊部落：改為複選 st.multiselect ---
+            st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
+            new_r = st.multiselect(
                 "部落選擇",
-                [
-                    "Jiyayo 椰油",
-                    "Jiraralay 朗島",
-                    "Jiranmilek 東清",
-                    "Jivalino 野銀",
-                    "Jimowrod 紅頭",
-                    "Jiratay 漁人",
-                    "Ivatan 巴丹",
-                    "Ji Taywan 台灣",
-                    "ilaod 其他",
-                ],
+                REGION_OPTIONS,
+                default=["Jiyayo 椰油"],
                 label_visibility="collapsed"
             )
             st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
             new_a = st.selectbox(
                 "年齡選擇",
-                [
-                    "alikey 學齡前",
-                    "kosiaw 國小",
-                    "kocong aka kawcong 國高中",
-                    "18-30",
-                    "31-40",
-                    "41-50",
-                    "51-60",
-                    "61-70",
-                    "71-80",
-                    "ikaroa a ngernan o kakawakawan 81歲及以上",
-                ],
+                AGE_OPTIONS,
                 label_visibility="collapsed"
             )
             st.markdown(dual_text("mikataretarek", "性別"), unsafe_allow_html=True)
             new_g = st.selectbox(
                 "性別選擇",
-                ["mehakay 男", "mavakes 女", "ji nipanci 不公開"],
+                GENDER_OPTIONS,
                 label_visibility="collapsed"
             )
             if st.button("mamareng 註冊"):
-                if add_user(new_u, new_p, new_e, new_r, new_a, new_g):
+                if not new_r:
+                    st.warning("請至少選擇一個部落。")
+                elif add_user(new_u, new_p, new_e, new_r, new_a, new_g):
                     st.success("註冊成功，請切換登入。")
                 else:
                     st.warning("帳號已被註冊。")
@@ -600,60 +570,42 @@ if main_menu == "miAI ko / 我要用AI":
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
     else:
         user = st.session_state.user_info
-        r_list = [
-            "Jiyayo 椰油",
-            "Jiraralay 朗島",
-            "Jiranmilek 東清",
-            "Jivalino 野銀",
-            "Jimowrod 紅頭",
-            "Jiratay 漁人",
-            "Ivatan 巴丹",
-            "Ji Taywan 台灣",
-            "ilaod 其他",
-        ]
-        a_list = [
-            "alikey 學齡前",
-            "kosiaw 國小",
-            "kocong aka kawcong 國高中",
-            "18-30",
-            "31-40",
-            "41-50",
-            "51-60",
-            "61-70",
-            "71-80",
-            "ikaroa a ngernan o kakawakawan 81歲及以上",
-        ]
-        g_list = ["mehakay 男", "mavakes 女", "ji nipanci 不公開"]
+        
+        # 處理登入使用者的部落資訊 (文字相容轉 List)
+        saved_region = user["region"]
+        if isinstance(saved_region, str):
+            user_regions = [r.strip() for r in saved_region.split(",")]
+        else:
+            user_regions = saved_region
+        # 濾除非預設選項
+        default_regions = [r for r in user_regions if r in REGION_OPTIONS]
+        if not default_regions:
+            default_regions = ["Jiyayo 椰油"]
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown(dual_text("ili", "部落"), unsafe_allow_html=True)
-            cur_r = st.selectbox(
+            # --- 主頁面部落選擇：改為複選 st.multiselect ---
+            st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
+            cur_r = st.multiselect(
                 "ili",
-                r_list,
-                index=r_list.index(user["region"])
-                if user["region"] in r_list
-                else 0,
+                REGION_OPTIONS,
+                default=default_regions,
                 label_visibility="collapsed"
             )
         with c2:
             st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
             cur_a = st.selectbox(
                 "kakawakawan",
-                a_list,
-                index=a_list.index(user["age_group"])
-                if user["age_group"] in a_list
-                else 3,
+                AGE_OPTIONS,
+                index=AGE_OPTIONS.index(user["age_group"]) if user["age_group"] in AGE_OPTIONS else 3,
                 label_visibility="collapsed"
             )
         with c3:
             st.markdown(dual_text("mikataretarek", "性別"), unsafe_allow_html=True)
             cur_g = st.selectbox(
                 "mikataretarek",
-                g_list,
-                index=g_list.index(user["gender"])
-                if user["gender"] in g_list
-                else 0,
+                GENDER_OPTIONS,
+                index=GENDER_OPTIONS.index(user["gender"]) if user["gender"] in GENDER_OPTIONS else 0,
                 label_visibility="collapsed"
             )
         current_bg = {"region": cur_r, "age_group": cur_a, "gender": cur_g}
@@ -685,13 +637,10 @@ if main_menu == "miAI ko / 我要用AI":
                         ai_data = process_ai_input(audio_file=voice_input)
 
                         if ai_data:
-                            r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
                             st.session_state.active_q = ai_data.get("user_recognized_tao", "語音輸入")
                             st.session_state.ai_data = ai_data
                             st.session_state.user_audio_bytes = audio_bytes
                             st.session_state.user_audio_mime = mime_type
-                            st.session_state.ai_audio_bytes = r_tts_bytes
-                            st.session_state.ai_audio_mime = ("audio/mp3" if r_tts_bytes else None)
                             st.session_state.active_bg = current_bg
                             st.session_state.last_processed_audio = voice_input
                             st.rerun()
@@ -708,15 +657,10 @@ if main_menu == "miAI ko / 我要用AI":
                     with st.spinner("⏳ 演算法檢索與備援處理中..."):
                         ai_data = process_ai_input(text_prompt=text_input)
                         if ai_data:
-                            q_tts_bytes = generate_tts_bytes(ai_data.get("user_recognized_tao", text_input))
-                            r_tts_bytes = generate_tts_bytes(ai_data.get("ai_reply_tao"))
-
                             st.session_state.active_q = text_input
                             st.session_state.ai_data = ai_data
-                            st.session_state.user_audio_bytes = q_tts_bytes
-                            st.session_state.user_audio_mime = ("audio/mp3" if q_tts_bytes else None)
-                            st.session_state.ai_audio_bytes = r_tts_bytes
-                            st.session_state.ai_audio_mime = ("audio/mp3" if r_tts_bytes else None)
+                            st.session_state.user_audio_bytes = None
+                            st.session_state.user_audio_mime = None
                             st.session_state.active_bg = current_bg
 
         if "ai_data" in st.session_state and st.session_state.ai_data:
@@ -751,8 +695,6 @@ if main_menu == "miAI ko / 我要用AI":
                 """,
                 unsafe_allow_html=True
             )
-            if st.session_state.get("ai_audio_bytes"):
-                st.audio(st.session_state.ai_audio_bytes, format="audio/mp3")
 
             st.markdown(
                 f"""
@@ -786,8 +728,6 @@ if main_menu == "miAI ko / 我要用AI":
                         st.session_state.get("user_audio_mime"),
                         ai_data.get("ai_reply_tao"),
                         ai_data.get("ai_reply_zh"),
-                        st.session_state.get("ai_audio_bytes"),
-                        st.session_state.get("ai_audio_mime"),
                         is_edited=False,
                         is_error=False,
                     ):
@@ -850,16 +790,16 @@ if main_menu == "miAI ko / 我要用AI":
                         final_q_bytes = get_bytes_from_input(new_q_input)
                         final_q_mime = getattr(new_q_input, "type", "audio/wav")
                     else:
-                        final_q_bytes = generate_tts_bytes(e_q_tao)
-                        final_q_mime = ("audio/mp3" if final_q_bytes else None)
+                        final_q_bytes = None
+                        final_q_mime = None
 
                     new_r_input = r_audio_rec or r_audio_file
                     if new_r_input:
                         final_r_bytes = get_bytes_from_input(new_r_input)
                         final_r_mime = getattr(new_r_input, "type", "audio/wav")
                     else:
-                        final_r_bytes = generate_tts_bytes(e_r_tao)
-                        final_r_mime = ("audio/mp3" if final_r_bytes else None)
+                        final_r_bytes = None
+                        final_r_mime = None
 
                     if save_語料_to_supabase(
                         st.session_state.user_info,
@@ -1010,10 +950,13 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                 if st.button("送出投票紀錄", key=f"btn_vote_{fb_id}"):
                                     try:
                                         voter_info = st.session_state.user_info
+                                        voter_region = voter_info.get("region", "未知")
+                                        voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
+
                                         vote_record = {
                                             "feedback_id": fb_id,
                                             "voter_id": current_user,
-                                            "region": voter_info.get("region", "未知"),
+                                            "region": voter_region_str,
                                             "age_group": voter_info.get("age_group", "未知"),
                                             "gender": voter_info.get("gender", "未知"),
                                             "vote_result": vote_choice,
