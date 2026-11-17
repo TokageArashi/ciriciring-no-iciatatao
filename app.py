@@ -103,7 +103,6 @@ def make_hashes(password):
 
 def add_user(username, password, email, region, age_group, gender):
     try:
-        # region 若為列表，自動轉為逗號分隔字串
         region_str = ", ".join(region) if isinstance(region, list) else region
         data = {
             "username": username,
@@ -136,18 +135,14 @@ def login_user(username, password):
         return []
 
 
-# --- 3. Supabase 讀寫函式 ---
+# --- 3. Supabase 讀寫函式 (無語音檔需求) ---
 def save_語料_to_supabase(
     user_info,
     bg_info,
     q_orig,
     q_trans,
-    q_audio_bytes,
-    q_mime,
     r_tao,
     r_zh,
-    r_audio_bytes=None,
-    r_mime=None,
     is_edited=False,
     is_error=False,
 ):
@@ -163,16 +158,12 @@ def save_語料_to_supabase(
             "gender": bg_info["gender"],
             "q_original": q_orig,
             "q_trans": q_trans,
-            "q_audio_data": (
-                f"\\x{q_audio_bytes.hex()}" if q_audio_bytes else None
-            ),
-            "q_audio_mime": q_mime,
+            "q_audio_data": None,
+            "q_audio_mime": None,
             "tao_text": r_tao,
             "zh_text": r_zh,
-            "r_audio_data": (
-                f"\\x{r_audio_bytes.hex()}" if r_audio_bytes else None
-            ),
-            "r_audio_mime": r_mime,
+            "r_audio_data": None,
+            "r_audio_mime": None,
             "is_edited": 1 if is_edited else 0,
             "error_count": 1 if is_error else 0,
             "timestamp": datetime.datetime.now().isoformat(),
@@ -208,17 +199,7 @@ def delete_feedback_item(feedback_id, current_username):
         return False, f"刪除失敗：{e}"
 
 
-def get_bytes_from_input(audio_input):
-    if not audio_input:
-        return None
-    if hasattr(audio_input, "seek"):
-        audio_input.seek(0)
-    if hasattr(audio_input, "read"):
-        return audio_input.read()
-    return audio_input
-
-
-# --- 5. 語料庫讀取與檢索 ---
+# --- 4. 語料庫讀取與檢索 ---
 @st.cache_data(ttl=300)
 def load_all_raw_corpus():
     corpus_items = []
@@ -235,7 +216,7 @@ def load_all_raw_corpus():
                 }
             )
     except Exception as e:
-        st.warning(f"⚠️ 讀取 3 欄位 corpus 語料庫提示：{e}")
+        st.warning(f"⚠️ 讀取 corpus 語料庫提示：{e}")
 
     try:
         res_feedback = (
@@ -351,9 +332,9 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 6. 雙軌邏輯 ---
-def process_ai_input(text_prompt=None, audio_file=None):
-    if text_prompt and audio_file is None:
+# --- 5. 雙軌邏輯 ---
+def process_ai_input(text_prompt=None):
+    if text_prompt:
         algo_result = algorithm_first_processing(text_prompt)
         if algo_result:
             return algo_result
@@ -383,7 +364,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 【絕對強制規則 —— 零幻覺與逐字合規檢查】：
 1. **逐字來源核對與自創標註**：
    - AI 回應的達悟語句子（ai_reply_tao）中的每一個單字，請優先從上方【唯一合規參考語料庫】挑選。
-   - 若概念為現代詞或語料庫中確實找不到對應詞彙，請根據達悟語借詞原則進行音譯，且該單字必須強制加上標註 `[AI自創]`（例如：soci [AI自創]）。
+   - 若概念為現代詞或語料庫中確實找不到對應詞彙，請根據達悟語借詞原則進行音譯，且該單字必須強制加上標註 `[AI自創]`。
 2. **使用者輸入與自創字處理**：
    - 若使用者輸入了語料庫沒有的自創字或異體字，請在辨識結果中標註 `[使用者推薦]`。
 3. **強制引用與查驗**：
@@ -401,19 +382,7 @@ def process_ai_input(text_prompt=None, audio_file=None):
 """
 
     contents = [system_prompt]
-
-    if audio_file is not None:
-        try:
-            audio_bytes = get_bytes_from_input(audio_file)
-            mime_type = getattr(audio_file, "type", "audio/wav")
-            contents.append({"mime_type": mime_type, "data": audio_bytes})
-            contents.append(
-                "請對照【唯一合規參考語料庫】進行語音轉寫與回應，確保每一個字都有跡可循。"
-            )
-        except Exception as e:
-            st.error(f"讀取錄音檔失敗：{e}")
-            return None
-    elif text_prompt:
+    if text_prompt:
         contents.append(f"使用者輸入文字：{text_prompt}")
     else:
         return None
@@ -484,7 +453,7 @@ AGE_OPTIONS = [
 GENDER_OPTIONS = ["mehakay 男", "mavakes 女", "ji nipanci 不公開"]
 
 
-# --- 7. 側邊欄：登入與註冊 ---
+# --- 6. 側邊欄：登入與註冊 ---
 with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
     st.caption("☁️ 雲端資料庫已連線")
@@ -516,7 +485,6 @@ with st.sidebar:
             st.markdown(dual_text("ivoka no teygami", "信箱"), unsafe_allow_html=True)
             new_e = st.text_input("信箱輸入框", label_visibility="collapsed")
             
-            # --- 註冊部落：改為複選 st.multiselect ---
             st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
             new_r = st.multiselect(
                 "部落選擇",
@@ -550,7 +518,7 @@ with st.sidebar:
             st.session_state.user_info = None
             st.rerun()
 
-# --- 8. 主頁面區塊 ---
+# --- 7. 主頁面區塊 ---
 main_menu = st.radio(
     "",
     [
@@ -571,20 +539,17 @@ if main_menu == "miAI ko / 我要用AI":
     else:
         user = st.session_state.user_info
         
-        # 處理登入使用者的部落資訊 (文字相容轉 List)
         saved_region = user["region"]
         if isinstance(saved_region, str):
             user_regions = [r.strip() for r in saved_region.split(",")]
         else:
             user_regions = saved_region
-        # 濾除非預設選項
         default_regions = [r for r in user_regions if r in REGION_OPTIONS]
         if not default_regions:
             default_regions = ["Jiyayo 椰油"]
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            # --- 主頁面部落選擇：改為複選 st.multiselect ---
             st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
             cur_r = st.multiselect(
                 "ili",
@@ -612,56 +577,20 @@ if main_menu == "miAI ko / 我要用AI":
 
         st.divider()
 
-        st.markdown(dual_text("apen mo o pangap mo do vahey ta", "請選擇輸入方式"), unsafe_allow_html=True)
-        input_type = st.radio(
-            "input_type_radio",
-            ["koan ko / 達悟語語音輸入", "mivatvatek ko / 文字輸入"],
-            horizontal=True,
+        st.markdown(dual_text("mivatvatek", "請輸入文字"), unsafe_allow_html=True)
+        text_input = st.text_input(
+            "text_input_box",
+            placeholder="例如：Akokay / 今天天氣如何？",
             label_visibility="collapsed"
         )
-
-        if "koan ko" in input_type:
-            st.markdown(
-                dual_text("apisen o maykevon do teyrahem, no mateyka am teyka rana", "請點擊下方麥克風圖示開始錄音，完成後停止即可自動辨識"), 
-                unsafe_allow_html=True
-            )
-            voice_input = st.audio_input(
-                "mapalolo so ciring 開始錄音", key="voice_input_main"
-            )
-
-            if voice_input is not None:
-                if st.session_state.get("last_processed_audio") != voice_input:
-                    with st.spinner("⏳ 正在進行語音處理..."):
-                        audio_bytes = get_bytes_from_input(voice_input)
-                        mime_type = getattr(voice_input, "type", "audio/wav")
-                        ai_data = process_ai_input(audio_file=voice_input)
-
-                        if ai_data:
-                            st.session_state.active_q = ai_data.get("user_recognized_tao", "語音輸入")
-                            st.session_state.ai_data = ai_data
-                            st.session_state.user_audio_bytes = audio_bytes
-                            st.session_state.user_audio_mime = mime_type
-                            st.session_state.active_bg = current_bg
-                            st.session_state.last_processed_audio = voice_input
-                            st.rerun()
-
-        else:
-            st.markdown(dual_text("mivatvatek", "請輸入"), unsafe_allow_html=True)
-            text_input = st.text_input(
-                "text_input_box",
-                placeholder="例如：Akokay / 今天天氣如何？",
-                label_visibility="collapsed"
-            )
-            if st.button("itoro 發送查詢（演算法優先）"):
-                if text_input.strip():
-                    with st.spinner("⏳ 演算法檢索與備援處理中..."):
-                        ai_data = process_ai_input(text_prompt=text_input)
-                        if ai_data:
-                            st.session_state.active_q = text_input
-                            st.session_state.ai_data = ai_data
-                            st.session_state.user_audio_bytes = None
-                            st.session_state.user_audio_mime = None
-                            st.session_state.active_bg = current_bg
+        if st.button("itoro 發送查詢（演算法優先）"):
+            if text_input.strip():
+                with st.spinner("⏳ 演算法檢索與備援處理中..."):
+                    ai_data = process_ai_input(text_prompt=text_input)
+                    if ai_data:
+                        st.session_state.active_q = text_input
+                        st.session_state.ai_data = ai_data
+                        st.session_state.active_bg = current_bg
 
         if "ai_data" in st.session_state and st.session_state.ai_data:
             ai_data = st.session_state.ai_data
@@ -679,11 +608,6 @@ if main_menu == "miAI ko / 我要用AI":
                 """,
                 unsafe_allow_html=True
             )
-            if st.session_state.get("user_audio_bytes"):
-                st.audio(
-                    st.session_state.user_audio_bytes,
-                    format=st.session_state.get("user_audio_mime", "audio/mp3"),
-                )
 
             st.markdown(
                 f"""
@@ -724,8 +648,6 @@ if main_menu == "miAI ko / 我要用AI":
                         bg_info,
                         ai_data.get("user_recognized_tao", q_orig),
                         ai_data.get("user_translation"),
-                        st.session_state.get("user_audio_bytes"),
-                        st.session_state.get("user_audio_mime"),
                         ai_data.get("ai_reply_tao"),
                         ai_data.get("ai_reply_zh"),
                         is_edited=False,
@@ -736,82 +658,45 @@ if main_menu == "miAI ko / 我要用AI":
                         st.rerun()
 
             elif "beken" in eval_choice:
-                st.warning("⚠ 發現錯誤。您可以修正文字、語音與參考資料來源：")
+                st.warning("⚠ 發現錯誤。您可以修正文字與參考資料來源：")
 
-                st.markdown(dual_text("ablisan o pacici", "修正【問題】"))
+                # 正確的標題顯示（無 HTML 外漏）
+                st.markdown("**ablisan o pacici**<br><span style='font-size:14px; opacity:0.8;'>修正【問題】</span>", unsafe_allow_html=True)
                 e_q_tao = st.text_input(
                     "修改句子 1 達悟語：",
                     value=ai_data.get("user_recognized_tao", q_orig),
                 )
-                st.markdown(dual_text("ablisan o mivaliw no pacici", "修改問題翻譯"))
+                st.markdown("**ablisan o mivaliw no pacici**<br><span style='font-size:14px; opacity:0.8;'>修改問題翻譯</span>", unsafe_allow_html=True)
                 e_q_trans = st.text_input(
                     "修改句子 1 翻譯：",
                     value=ai_data.get("user_translation", ""),
                 )
 
-                q_audio_rec = st.audio_input(
-                    "mapalolo so ciring no pacici 🎤 重新錄製【問題語音】（選擇性）：", key="edit_q_rec"
-                )
-                q_audio_file = st.file_uploader(
-                    "ipanta o izeziak do tyenaw 📁 上傳【語音檔】（選擇性）：",
-                    type=["wav", "mp3", "m4a"],
-                    key="edit_q_file",
-                )
-
-                st.markdown(dual_text("ablisan o tovis", "修正【回應】"))
+                st.markdown("**ablisan o tovis**<br><span style='font-size:14px; opacity:0.8;'>修正【回應】</span>", unsafe_allow_html=True)
                 e_r_tao = st.text_input(
                     "修改句子 2 達悟語：",
                     value=ai_data.get("ai_reply_tao", ""),
                 )
-                st.markdown(dual_text("ablisan o mivaliw no tovis", "修改回應翻譯"))
+                st.markdown("**ablisan o mivaliw no tovis**<br><span style='font-size:14px; opacity:0.8;'>修改回應翻譯</span>", unsafe_allow_html=True)
                 e_r_zh = st.text_input(
                     "修改句子 2 翻譯：",
                     value=ai_data.get("ai_reply_zh", ""),
                 )
 
-                r_audio_rec = st.audio_input(
-                    "mapalolo so ciring no tovis 🎤 重新錄製【回應語音】（選擇性）：", key="edit_r_rec"
-                )
-                r_audio_file = st.file_uploader(
-                    "ipanta ipanta o izeziak do tyenaw 📁 上傳【回應語音檔】（選擇性）：",
-                    type=["wav", "mp3", "m4a"],
-                    key="edit_r_file",
-                )
-
-                st.markdown(dual_text("ablisan o vakong no ciring", "修改【參考資料 / 語料來源】"))
+                st.markdown("**ablisan o vakong no ciring**<br><span style='font-size:14px; opacity:0.8;'>修改【參考資料 / 語料來源】</span>", unsafe_allow_html=True)
                 e_ref = st.text_input(
                     "修改【參考資料 / 語料來源】：",
                     value=ai_data.get("reference", ""),
                 )
 
-                if st.button("voka 💾 儲存"):
-                    new_q_input = q_audio_rec or q_audio_file
-                    if new_q_input:
-                        final_q_bytes = get_bytes_from_input(new_q_input)
-                        final_q_mime = getattr(new_q_input, "type", "audio/wav")
-                    else:
-                        final_q_bytes = None
-                        final_q_mime = None
-
-                    new_r_input = r_audio_rec or r_audio_file
-                    if new_r_input:
-                        final_r_bytes = get_bytes_from_input(new_r_input)
-                        final_r_mime = getattr(new_r_input, "type", "audio/wav")
-                    else:
-                        final_r_bytes = None
-                        final_r_mime = None
-
+                if st.button("voka 💾 儲存修正版"):
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
                         lower_first_char(e_q_tao),
                         e_q_trans,
-                        final_q_bytes,
-                        final_q_mime,
                         lower_first_char(e_r_tao),
                         e_r_zh,
-                        final_r_bytes,
-                        final_r_mime,
                         is_edited=True,
                         is_error=True,
                     ):
@@ -880,12 +765,6 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             """,
                             unsafe_allow_html=True
                         )
-                        if fb.get("q_audio_data"):
-                            try:
-                                q_bytes = bytes.fromhex(fb["q_audio_data"].replace("\\x", ""))
-                                st.audio(q_bytes, format=fb.get("q_audio_mime", "audio/wav"))
-                            except Exception:
-                                pass
 
                         st.markdown(
                             f"""
@@ -897,12 +776,6 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             """,
                             unsafe_allow_html=True
                         )
-                        if fb.get("r_audio_data"):
-                            try:
-                                r_bytes = bytes.fromhex(fb["r_audio_data"].replace("\\x", ""))
-                                st.audio(r_bytes, format=fb.get("r_audio_mime", "audio/mp3"))
-                            except Exception:
-                                pass
 
                         st.markdown(
                             f"""
@@ -987,12 +860,9 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         st.error(f"讀取社群資料失敗：{e}")
 
 elif main_menu == "amian so AI ori / 關於本站":
-    st.subheader("🏝️ 關於 ciriciring no iciatatao (眾語)")
+    st.subheader("🏝️ 關於 🏝️ [ciriciring no iciatatao](https://gemini.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe)")
     st.markdown(
         """
-        ### 專案願景
-        本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的語意與語音採集互動系統。
-
         ### 系統特色
         1. **正詞法與音系約束**：採用達悟語專屬羅馬字拼音規則，自動關閉瀏覽器拼字檢查以提供最佳輸入體驗。
         2. **嚴謹引用機制**：AI 生成回應時，強制比對與引用合規參考語料庫，確保語法與文化情境精確。
