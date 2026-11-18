@@ -445,10 +445,142 @@ def build_word_index():
     return index
 
 
+# --- 5.5 單字描述校正與異體字判定 ---
+# 需要在 Supabase 建立資料表（只新增、不覆蓋，保留修改紀錄；同一個字以最新一筆為準）：
+#   create table word_notes (
+#     id          bigint generated always as identity primary key,
+#     word        text not null,
+#     description text not null,
+#     editor      text,
+#     created_at  timestamptz default now()
+#   );
+#   create index on word_notes (word);
+# （若資料表有啟用 RLS，需比照 community_votes 加上 select / insert policy）
+REL_SPELLING = "拼法不同（同一個字的不同寫法）"
+REL_TRANSLATION = "譯詞相同（不同的字，意思完全一樣）"
+
+
+def _desc_norm(s):
+    """比較描述用：去掉空白與標點、轉小寫。"""
+    return re.sub(r"[\s\u3000,.;:!?，。；：！？、/／()（）「」『』\"'“”]+", "", (s or "").lower())
+
+
+def _edit_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def spelling_similar(a, b):
+    """明顯只是拼法不同：長度至少 3，且編輯距離不超過 max(1, 長度//4)。"""
+    if not a or not b or a == b:
+        return False
+    longer = max(len(a), len(b))
+    return longer >= 3 and _edit_distance(a, b) <= max(1, longer // 4)
+
+
+@st.cache_data(ttl=60)
+def load_word_notes():
+    """單字 -> {'description', 'editor', 'created_at'}；使用者校正過的描述，同一字以最新一筆為準。"""
+    notes = {}
+    try:
+        res = (
+            supabase.from_("word_notes")
+            .select("word, description, editor, created_at")
+            .order("id")
+            .execute()
+        )
+    except Exception:
+        return notes
+    for r in res.data or []:
+        w = normalize_word(r.get("word") or "")
+        d = (r.get("description") or "").strip()
+        if w and d:
+            notes[w] = {"description": d, "editor": r.get("editor"), "created_at": r.get("created_at")}
+    return notes
+
+
+def save_word_note(word, description, editor):
+    supabase.from_("word_notes").insert(
+        {"word": word, "description": description.strip(), "editor": editor}
+    ).execute()
+    load_word_notes.clear()
+    load_vote_data.clear()  # 異體字是否成立取決於描述，所以一併重算
+
+
+def link_is_valid(a, b, rel, notes):
+    """
+    兩個字能不能算異體字（每次讀取時重新判斷，描述被改掉後關係會自動解除）：
+      spelling    ：拼法明顯相近，且沒有「兩邊描述都有、卻不同」的反證
+      translation ：兩邊都有描述，且描述相同（譯詞相同）
+    意思只是相近、描述不同的字不會成立。
+    """
+    da = (notes.get(a) or {}).get("description")
+    db = (notes.get(b) or {}).get("description")
+    if rel == "spelling":
+        if da and db and _desc_norm(da) != _desc_norm(db):
+            return False
+        return spelling_similar(a, b)
+    if rel == "translation":
+        return bool(da and db and _desc_norm(da) == _desc_norm(db))
+    return False
+
+
+def check_variant_proposal(word, alt, rel, shared_desc, notes):
+    """檢查提出的異體字。回傳 (是否通過, 錯誤訊息, 需要補存的描述 {字: 描述})。"""
+    da = (notes.get(word) or {}).get("description")
+    db = (notes.get(alt) or {}).get("description")
+
+    if rel == "spelling":
+        if not spelling_similar(word, alt):
+            return False, (
+                f"「{alt}」與「{word}」的拼法差異太大，不能算只是拼法不同。"
+                "若兩者是不同的字、但譯詞完全相同，請改選「譯詞相同」並填寫共同描述。"
+            ), {}
+        if da and db and _desc_norm(da) != _desc_norm(db):
+            return False, f"「{word}」（{da}）與「{alt}」（{db}）的描述不同，不能算同一個字的不同拼法。", {}
+        return True, "", {}
+
+    shared = (shared_desc or "").strip()
+    if not shared:
+        return False, "選擇「譯詞相同」時，請填寫兩字共同的中文描述。", {}
+    to_save = {}
+    for w in (word, alt):
+        cur = (notes.get(w) or {}).get("description")
+        if cur:
+            if _desc_norm(cur) != _desc_norm(shared):
+                return False, (
+                    f"「{w}」目前的描述是「{cur}」，與您填寫的「{shared}」不同，所以不能算異體字。"
+                    "若描述有誤，請先修改該字的描述；若兩字只是意思相近、並非譯詞，請不要提出為異體字。"
+                ), {}
+        else:
+            to_save[w] = shared
+    return True, "", to_save
+
+
+def build_notes_context(*texts, limit=30):
+    """從文字中找出有被使用者校正過描述的字，整理成給模型的參考。"""
+    notes = load_word_notes()
+    if not notes:
+        return ""
+    seen, lines = set(), []
+    for t in texts:
+        for tok in (t or "").split():
+            w = normalize_word(tok)
+            if w in notes and w not in seen:
+                seen.add(w)
+                lines.append(f"- {w}: {notes[w]['description']}")
+    return "\n".join(lines[:limit])
+
+
 def _parse_vote(v):
     """
-    把一筆 community_votes 解析成 (被投票的單字, 投給的拼法)。
-    新格式: word_key:apia | pick:apiya
+    把一筆 community_votes 解析成 (被投票的單字, 投給的拼法, 異體關係)。
+    新格式: word_key:apia | pick:apiya | rel:spelling（或 rel:translation；投給既有拼法時沒有 rel）
     舊格式: word_key:apia | 替代詞: apiya  /  word_key:apia | 贊同  /  word_key:apia | 不贊同
     """
     sug = str(v.get("hidden_suggestion", "") or "").lower()
@@ -468,7 +600,8 @@ def _parse_vote(v):
         pick = word
     else:
         pick = None  # 舊資料：不贊同但沒有提出替代拼法
-    return word, (pick or None)
+    rl = re.search(r"rel:(spelling|translation)", sug)
+    return word, (pick or None), (rl.group(1) if rl else None)
 
 
 @st.cache_data(ttl=30)
@@ -485,6 +618,7 @@ def load_vote_data():
     except Exception:
         return empty
 
+    notes = load_word_notes()
     parent = {}
 
     def find(x):
@@ -499,11 +633,12 @@ def load_vote_data():
         parsed = _parse_vote(v)
         if not parsed:
             continue
-        word, pick = parsed
+        word, pick, rel = parsed
         find(word)
         if pick:
             tally[pick] = tally.get(pick, 0) + 1
-            if pick != word:  # 有人把 word 的替代拼法提為 pick → 兩者視為同一個詞的不同拼法
+            # 只有「拼法不同」或「譯詞（描述）相同」且通過驗證的才算異體字；舊資料沒有 rel，不成組
+            if pick != word and rel and link_is_valid(word, pick, rel, notes):
                 ra, rb = find(word), find(pick)
                 if ra != rb:
                     parent[rb] = ra
@@ -668,6 +803,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
     word_index = build_word_index()
     vote_data = load_vote_data()
+    notes = load_word_notes()
     user_words = {normalize_word(t) for t in (user_input_text or "").split()} - {""}
 
     skey = sentence_key(fb_id, sentence_id)
@@ -691,11 +827,15 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                 else:
                     etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
                     example_zh = info.get("zh")
-                    zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
+                    note = notes.get(clean_w)  # 使用者校正過的描述，優先於 AI / 例句的解釋
+                    if note:
+                        zh_meaning = note["description"]
+                    else:
+                        zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
                     category_title = "🔴 AI 自創字" if level == "red" else "🟡 使用者輸入 / 低用例詞彙"
                     tag = "hlR" if level == "red" else "hlY"
 
-                    # 同一個詞的不同拼法（有人提出過替代拼法才會成組）與各自票數
+                    # 同一個詞的異體字（通過驗證才會成組）與各自票數
                     group_root = vote_data["group_of"].get(clean_w)
                     others = [m for m in vote_data["members"].get(group_root, []) if m != clean_w]
                     usage = {m: word_index.get(m, {}).get("count", 0) for m in [clean_w] + others}
@@ -706,16 +846,43 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                     with st.popover(w, key=f"{key_prefix}_{tag}_{idx}"):
                         st.markdown(f"### 🔠 單字詳情: **{w}**")
                         st.markdown(f"- **中文解釋**: {zh_meaning}")
+                        if note:
+                            st.caption(f"✏️ 已由 {note.get('editor') or '使用者'} 校正（{str(note.get('created_at') or '')[:10]}）")
                         st.markdown(f"- **分類**: {category_title}")
-                        if etymology_text and example_zh:
+                        if etymology_text and example_zh and not note:
                             st.markdown(f"- **語源說明**: {etymology_text}")
                         st.markdown(f"- **本站總用例數**: `{occ_count}` 次")
 
+                        if current_user:
+                            current_desc = note["description"] if note else etymology_text
+                            new_desc = st.text_area(
+                                "解釋有誤？直接修改這個字的中文描述：",
+                                value=current_desc,
+                                key=f"desc_{key_prefix}_{idx}",
+                                height=80,
+                            )
+                            if others:
+                                st.caption(f"⚠️ 本字目前與 {'、'.join(others)} 互為異體字；描述若改成與它們不同，異體關係會自動解除。")
+                            if st.button("儲存描述", key=f"btn_desc_{key_prefix}_{idx}"):
+                                try:
+                                    nd = new_desc.strip()
+                                    if not nd:
+                                        raise ValueError("描述不可為空白。")
+                                    if nd == (current_desc or "").strip():
+                                        raise ValueError("描述沒有變更。")
+                                    save_word_note(clean_w, nd, current_user)
+                                    st.success("✅ 已更新描述")
+                                    st.rerun()
+                                except Exception as desc_err:
+                                    st.error(f"儲存失敗：{desc_err}")
+
                         st.divider()
-                        st.markdown("#### 📊 拼法與票數（票數 ＝ 本站用例 ＋ 投票人數）")
+                        st.markdown("#### 📊 異體字與票數（票數 ＝ 本站用例 ＋ 投票人數）")
                         for m in variants:
                             mark = "（本句）" if m == clean_w else ""
-                            st.markdown(f"- **{m}**{mark}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
+                            desc_m = (notes.get(m) or {}).get("description")
+                            desc_part = f"〔{desc_m}〕" if desc_m else ""
+                            st.markdown(f"- **{m}**{mark}{desc_part}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
 
                         if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
                             st.info(f"✅ 您已對本句的「{w}」投過票了")
@@ -729,10 +896,21 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                                 horizontal=True,
                                 label_visibility="collapsed",
                             )
+                            st.caption("只有「拼法不同」或「譯詞（描述）完全相同」的字才能成為異體字；意思只是相近的字請不要提出。")
                             w_alt_input = st.text_input(
-                                "或提出其他拼法（單一單字；留空則採用上面的選擇）：",
+                                "提出新的異體字（單一單字；留空則只投上面的選擇）：",
                                 key=f"w_alt_{key_prefix}_{idx}",
                                 placeholder="例如：apiya",
+                            )
+                            w_rel = st.radio(
+                                "它與本字的關係：",
+                                [REL_SPELLING, REL_TRANSLATION],
+                                key=f"w_rel_{key_prefix}_{idx}",
+                            )
+                            w_shared = st.text_input(
+                                "兩字共同的中文描述（選「譯詞相同」時必填）：",
+                                key=f"w_shared_{key_prefix}_{idx}",
+                                value=note["description"] if note else "",
                             )
 
                             if st.button("送出投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
@@ -744,11 +922,23 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
                                     alt_raw = w_alt_input.strip()
                                     if alt_raw and re.search(r"\s", alt_raw):
-                                        raise ValueError("提出的拼法請只輸入單一單字。")
+                                        raise ValueError("提出的字請只輸入單一單字。")
                                     alt = normalize_word(alt_raw)
                                     if alt_raw and not alt:
-                                        raise ValueError("提出的拼法無效。")
-                                    pick = alt or w_choice  # 提出新拼法 = 同時投給該拼法
+                                        raise ValueError("提出的字無效。")
+
+                                    pick, rel_part = w_choice, ""
+                                    if alt and alt != clean_w:
+                                        rel = "spelling" if w_rel == REL_SPELLING else "translation"
+                                        load_word_notes.clear()
+                                        ok, msg, to_save = check_variant_proposal(clean_w, alt, rel, w_shared, load_word_notes())
+                                        if not ok:
+                                            raise ValueError(msg)
+                                        for ww, dd in to_save.items():
+                                            save_word_note(ww, dd, current_user)
+                                        pick, rel_part = alt, f" | rel:{rel}"
+                                    elif alt:
+                                        pick = alt
 
                                     voter_info = st.session_state.user_info
                                     voter_region = voter_info.get("region", "未知")
@@ -756,7 +946,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
                                     # 尚未儲存的回應句用 sent:<暫時id> 標記是哪一句
                                     sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
-                                    suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}"
+                                    suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
 
                                     supabase.from_("community_votes").insert({
                                         "feedback_id": fb_id if fb_id else 0,
@@ -802,11 +992,16 @@ def process_ai_input(text_prompt=None):
         else "【目前尚無合規的參考語料】"
     )
 
+    notes_context = build_notes_context(query_str, *legal_corpus) or "（無）"
+
     system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。目前處於「AI 備援生成」模式。
 
 【唯一合規參考語料庫】:
 {corpus_context}
+
+【使用者已校正的單字描述（以此為準；回應或 etymology 用到這些字時，請沿用此描述）】:
+{notes_context}
 
 【絕對強制規則】：
 1. 請勿在生成的達悟語句子中包含任何如 `[使用者推薦]` 或 `[AI自創]` 的文字標籤，保持句子乾淨。
@@ -1020,6 +1215,7 @@ if main_menu == "miAI ko / 我要用AI":
                     etymology_map=ai_data.get("etymology", {}),
                     key_prefix="main_user",
                     enable_word_voting=False,  # 自己輸入的句子只看說明與票數，投票在回應句進行
+                    current_user=st.session_state.user_info["username"],
                     user_input_text=user_sentence,
                 )
                 st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{ai_data.get('user_translation', '')}</div>", unsafe_allow_html=True)
@@ -1131,6 +1327,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             user_accepted=True,
                             key_prefix=f"fbq_{fb_id}",
                             enable_word_voting=False,  # 問句只看說明與票數；投票在「答」進行
+                            current_user=current_user,
                             user_input_text=fb.get('q_original', ''),
                         )
                         st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{fb.get('q_trans') or ''}</div>", unsafe_allow_html=True)
@@ -1170,7 +1367,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者推薦字顯示**黃色螢光筆**；AI 自創字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
-        3. **單字用法社群投票**：社群成員可在同一個詞的不同拼法之間投票，也能提出新的拼法；系統會依每位使用者自己的打字與投票習慣調整回應用字，彼此不互相干擾。
+        3. **單字用法社群投票**：社群成員可在同一個詞的不同拼法之間投票，也能提出新的拼法；系統會依每位使用者自己的打字與投票習慣調整回應用字，彼此不互相干擾。若 AI 對單字的解釋有誤，使用者可直接修改描述，之後該字一律顯示修改後的描述；異體字僅限拼法不同或譯詞（描述）相同的字，意思只是相近的字不算。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
