@@ -69,19 +69,30 @@ st.markdown(
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
     
-    /* 螢光筆彈窗按鈕樣式 */
-    div[data-testid="stPopover"] > button {
-        padding: 2px 8px !important;
-        margin: 0px 2px !important;
-        height: auto !important;
-        line-height: 1.4 !important;
-        font-size: 18px !important;
-        font-weight: bold !important;
-        border: none !important;
+    /* 螢光筆高亮樣式（保持文字連在一起） */
+    .highlight-yellow {
+        background-color: #FEF08A;
+        color: #1F2937;
+        padding: 2px 5px;
+        border-radius: 4px;
+        font-weight: bold;
+        display: inline-block;
+        margin: 2px 1px;
     }
-    .popover-yellow > button { background-color: #FEF08A !important; color: #854D0E !important; border-radius: 4px !important; }
-    .popover-red > button { background-color: #FECACA !important; color: #991B1B !important; border-radius: 4px !important; }
-    .popover-normal > button { background-color: transparent !important; color: inherit !important; font-weight: normal !important; }
+    .highlight-red {
+        background-color: #FECACA;
+        color: #991B1B;
+        padding: 2px 5px;
+        border-radius: 4px;
+        font-weight: bold;
+        display: inline-block;
+        margin: 2px 1px;
+    }
+    .highlight-normal {
+        padding: 2px 2px;
+        display: inline-block;
+        margin: 2px 1px;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -346,7 +357,7 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 5. 用例與互動彈窗渲染（具備防禦性型態檢查） ---
+# --- 5. 螢光標記與整合文本渲染 ---
 def count_word_occurrences(word):
     all_corpus = load_all_raw_corpus()
     count = 0
@@ -357,44 +368,53 @@ def count_word_occurrences(word):
             count += 1
     return count
 
-def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence"):
+def render_connected_highlighted_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence"):
     """
-    渲染可點擊的單字：加入防禦性型態檢查，避免 etymology_map 非 dict 時發生錯誤。
+    將文本連在一起顯示，並依據用例數與來源加上黃色或紅色螢光筆背景；
+    點擊特定單字下方或透過選單即可檢視詳情。
     """
-    # 確保 etymology_map 絕對是 dict，若不是則轉為空字典
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
     words = sentence.split()
-    cols = st.columns(len(words) if words else 1)
     
+    # 組合為流暢的一行 HTML 句子
+    html_parts = []
+    word_details = []
+
     for idx, w in enumerate(words):
         clean_w = w.strip(".,!?")
         occ_count = count_word_occurrences(clean_w)
-        
-        # 安全取值
         word_etymology = etymology_map.get(clean_w, "傳統詞彙用法")
         
         if occ_count >= 10:
-            css_class = "popover-normal"
+            css_class = "highlight-normal"
             category_title = "官方/常用詞彙 (用例充足)"
         elif is_ai_generated and not user_accepted:
-            css_class = "popover-red"
+            css_class = "highlight-red"
             category_title = "AI自創字"
         else:
-            css_class = "popover-yellow"
+            css_class = "popover-yellow highlight-yellow"
             category_title = "使用者推薦 / 低用例詞彙"
 
-        with cols[idx]:
-            st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-            with st.popover(w, key=f"{key_prefix}_{idx}_{clean_w}"):
-                st.markdown(f"### 📖 單字詳情: **{clean_w}**")
-                st.markdown(f"- **分類狀態**: {category_title}")
-                st.markdown(f"- **語源/說明**: {word_etymology}")
-                st.markdown(f"- **語料庫用例數**: `{occ_count}` 次")
-                if occ_count < 10:
-                    st.caption("註：用例數未滿 10 次，故以螢光筆特別醒目顯示。")
-            st.markdown('</div>', unsafe_allow_html=True)
+        # 儲存每個單字的介紹資訊供下方統一呈現或互動
+        word_details.append({
+            "word": clean_w,
+            "category": category_title,
+            "etymology": word_etymology,
+            "count": occ_count,
+            "css": css_class
+        })
+        
+        html_parts.append(f'<span class="{css_class}"><b>{w}</b></span>')
+
+    # 輸出連在一起的句子
+    st.markdown(f'<div style="font-size: 22px; font-weight: bold; line-height: 1.8;">' + " ".join(html_parts) + '</div>', unsafe_allow_html=True)
+    
+    # 提供一個下拉選單或展開區塊讓使用者點選查看各單字詳細語源
+    with st.expander("🔍 檢視句中各單字的語源與用例詳情"):
+        for detail in word_details:
+            st.markdown(f"- **{detail['word']}** [{detail['category']}]：{detail['etymology']} (目前用例數: `{detail['count']}` 次)")
 
 
 # --- 6. 雙軌邏輯 ---
@@ -470,7 +490,6 @@ def process_ai_input(text_prompt=None):
             if "is_ai_generated" not in result:
                 result["is_ai_generated"] = False
             
-            # 確保 etymology 解析為 dict
             if not isinstance(result.get("etymology"), dict):
                 result["etymology"] = {}
 
@@ -628,8 +647,8 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
-            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊單字查看語源與用例)")
-            render_interactive_sentence(
+            st.markdown("##### maniring o AI/演算法 am (回應結果 - 螢光標記與語源)")
+            render_connected_highlighted_sentence(
                 ai_data.get("ai_reply_tao", ""), 
                 is_ai_generated=is_ai, 
                 user_accepted=False, 
@@ -751,8 +770,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             unsafe_allow_html=True
                         )
 
-                        st.markdown("##### tovis (答 - 點擊單字查看語源介紹)")
-                        render_interactive_sentence(
+                        st.markdown("##### tovis (答 - 螢光標記與語源)")
+                        render_connected_highlighted_sentence(
                             fb.get('tao_text', ''),
                             is_ai_generated=False,
                             user_accepted=True,
@@ -838,12 +857,12 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         st.error(f"讀取社群資料失敗：{e}")
 
 elif main_menu == "amian so AI ori / 關於本站":
-    st.subheader(f"🏝️ 關於 🏝️ [達悟文語料庫&AI訓練](https://gemini.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe)")
+    st.subheader(f"🏝️ 關於 🏝️ 達悟文語料庫&AI訓練 (參閱筆記本: {emoji if 'emoji' in locals() else ''} [達悟文語料庫&AI訓練](https://notebooklm.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe))")
     st.markdown(
         """
         ### 專案願景
         本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
-        
+
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者推薦字顯示**黃色螢光筆**；AI 自創字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
