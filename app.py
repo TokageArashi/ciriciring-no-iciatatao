@@ -69,36 +69,33 @@ st.markdown(
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
     
-    /* 螢光筆彈窗按鈕樣式（完美重現黃色與紅色螢光底色） */
+    /* 模仿中文輸入法候選/點擊彈窗樣式：去除螢光筆與區塊底色，單字緊密流暢相連 */
+    .tao-sentence-container {
+        font-size: 20px;
+        font-weight: bold;
+        line-height: 2.0;
+        display: inline;
+    }
     div[data-testid="stPopover"] {
-        display: inline-block !important;
-        margin: 0px 3px !important;
+        display: inline !important;
+        margin: 0px 1px !important;
     }
     div[data-testid="stPopover"] > button {
-        padding: 3px 8px !important;
+        background-color: transparent !important;
+        color: inherit !important;
+        border: none !important;
+        padding: 0px 4px !important;
         height: auto !important;
         min-height: unset !important;
-        line-height: 1.4 !important;
-        font-size: 18px !important;
+        line-height: 1.5 !important;
+        font-size: 20px !important;
         font-weight: bold !important;
-        border: none !important;
-        border-radius: 4px !important;
+        box-shadow: none !important;
     }
-    /* 黃色螢光筆：使用者推薦 / 低用例 */
-    .popover-yellow > div[data-testid="stPopover"] > button { 
-        background-color: #FEF08A !important; 
-        color: #854D0E !important; 
-    }
-    /* 紅色螢光筆：AI自創字 */
-    .popover-red > div[data-testid="stPopover"] > button { 
-        background-color: #FECACA !important; 
-        color: #991B1B !important; 
-    }
-    /* 正常文字：用例充足 */
-    .popover-normal > div[data-testid="stPopover"] > button { 
-        background-color: transparent !important; 
-        color: inherit !important; 
-        font-weight: normal !important; 
+    div[data-testid="stPopover"] > button:hover {
+        color: #3B82F6 !important;
+        background-color: rgba(59, 130, 246, 0.1) !important;
+        border-radius: 4px;
     }
     </style>
 """,
@@ -364,7 +361,7 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 5. 互動單字彈窗與單字投票機制渲染 ---
+# --- 5. 輸入法選字窗風格之單字互動與投票渲染 ---
 def count_word_occurrences(word):
     all_corpus = load_all_raw_corpus()
     count = 0
@@ -377,14 +374,14 @@ def count_word_occurrences(word):
 
 def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None):
     """
-    將句子中的每一個單字渲染為帶有螢光底色的獨立 st.popover 按鈕，整句流暢連在一起。
+    將單字連在一起排版，點擊後彈出類似中文輸入法選字窗的精緻泡泡視窗。
     """
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
     words = sentence.split()
     
-    st.markdown('<div style="font-size: 20px; font-weight: bold; line-height: 2.5; display: flex; flex-wrap: wrap; align-items: center; gap: 4px;">', unsafe_allow_html=True)
+    st.markdown('<div class="tao-sentence-container">', unsafe_allow_html=True)
     
     for idx, w in enumerate(words):
         clean_w = w.strip(".,!?")
@@ -392,20 +389,16 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
         word_etymology = etymology_map.get(clean_w, "傳統詞彙用法")
         
         if occ_count >= 10:
-            css_class = "popover-normal"
             category_title = "官方/常用詞彙 (用例充足)"
         elif is_ai_generated and not user_accepted:
-            css_class = "popover-red"
             category_title = "AI自創字"
         else:
-            css_class = "popover-yellow"
             category_title = "使用者推薦 / 低用例詞彙"
 
-        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
         with st.popover(w, key=f"{key_prefix}_{idx}_{clean_w}"):
-            st.markdown(f"### 📖 單字詳情: **{clean_w}**")
-            st.markdown(f"- **分類狀態**: {category_title}")
-            st.markdown(f"- **語源/說明**: {word_etymology}")
+            st.markdown(f"### 🔠 候選字詞: **{clean_w}**")
+            st.markdown(f"- **分類**: {category_title}")
+            st.markdown(f"- **語源說明**: {word_etymology}")
             st.markdown(f"- **語料庫用例數**: `{occ_count}` 次")
             
             if enable_word_voting and fb_id and current_user:
@@ -452,8 +445,6 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         st.rerun()
                 except Exception as vote_err:
                     st.error(f"載入單字投票失敗：{vote_err}")
-            
-        st.markdown('</div>', unsafe_allow_html=True)
         
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -688,7 +679,7 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
-            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任意帶有螢光底色的單字查看詳情)")
+            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任意單字開啟選字候選窗)")
             render_interactive_sentence(
                 ai_data.get("ai_reply_tao", ""), 
                 is_ai_generated=is_ai, 
@@ -731,7 +722,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=False,
                         is_error=False,
                     ):
-                        st.success("🎉 已成功儲存！若包含 AI 自創字因您直接採納，後續將自動轉為黃色標記。")
+                        st.success("🎉 已成功儲存！")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -770,17 +761,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
     )
     try:
         res_feedback = supabase.from_("feedback").select("*").order("timestamp", desc=True).execute()
-        res_votes = supabase.from_("community_votes").select("*").execute()
-
         feedbacks = res_feedback.data if res_feedback.data else []
-        votes_data = res_votes.data if res_votes.data else []
-
-        votes_map = {}
-        for v in votes_data:
-            fid = v.get("feedback_id")
-            if fid not in votes_map:
-                votes_map[fid] = []
-            votes_map[fid].append(v)
 
         if not feedbacks:
             st.info("目前尚無採集到的語料。")
@@ -789,75 +770,51 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
             for fb in feedbacks:
                 fb_id = fb["id"]
-                fb_votes = votes_map.get(fb_id, [])
-                vote_count = len(fb_votes)
-
-                agree_count = sum(1 for v in fb_votes if v.get("vote_result") == "贊同")
-                disagree_count = sum(1 for v in fb_votes if v.get("vote_result") == "不贊同")
 
                 with st.expander(f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"):
-                    col_info, col_action = st.columns([4, 1])
+                    st.markdown(
+                        f"""
+                        <div style="padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(128, 128, 128, 0.3);">
+                            <div style="font-size: 16px; font-weight: bold;">pacici (問)</div>
+                            <div style="font-size: 18px; font-weight: bold; margin-top: 4px;">{fb.get('q_original')}</div>
+                            <div style="font-size: 14px; opacity: 0.8;">{fb.get('q_trans')}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
-                    with col_info:
-                        st.markdown(
-                            f"""
-                            <div style="padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                                <div style="font-size: 16px; font-weight: bold;">pacici (問)</div>
-                                <div style="font-size: 18px; font-weight: bold; margin-top: 4px;">{fb.get('q_original')}</div>
-                                <div style="font-size: 14px; opacity: 0.8;">{fb.get('q_trans')}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
+                    st.markdown("##### tovis (答 - 點擊任一單字即可開啟選字視窗進行單字投票)")
+                    
+                    # 啟用單字獨立投票與選字窗風格
+                    render_interactive_sentence(
+                        fb.get('tao_text', ''),
+                        is_ai_generated=False,
+                        user_accepted=True,
+                        key_prefix=f"fb_{fb_id}",
+                        enable_word_voting=True,
+                        fb_id=fb_id,
+                        current_user=current_user
+                    )
+                    st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 8px;'>{fb.get('zh_text')}</div>", unsafe_allow_html=True)
 
-                        st.markdown("##### tovis (答 - 點擊任一單字即可在小視窗內檢視語源並進行單字投票)")
-                        
-                        render_interactive_sentence(
-                            fb.get('tao_text', ''),
-                            is_ai_generated=False,
-                            user_accepted=True,
-                            key_prefix=f"fb_{fb_id}",
-                            enable_word_voting=True,
-                            fb_id=fb_id,
-                            current_user=current_user
-                        )
-                        st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 8px;'>{fb.get('zh_text')}</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div style="font-size: 14px; opacity: 0.8; margin-top: 5px;">
+                            <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
-                        st.markdown(
-                            f"""
-                            <div style="font-size: 14px; opacity: 0.8; margin-top: 5px;">
-                                <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')}
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-
-                        if fb_votes:
-                            st.markdown("---")
-                            st.caption("📊 社群單字投票與替代詞總覽：")
-                            for v in fb_votes:
-                                r_voter = v.get("region", "未知部落")
-                                a_voter = v.get("age_group", "未知年齡")
-                                g_voter = v.get("gender", "未知性別")
-                                res_voter = v.get("vote_result", "未表態")
-                                suggestion = v.get("hidden_suggestion", "")
-                                sug_text = f" ({suggestion})" if suggestion else ""
-                                st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{sug_text}")
-
-                    with col_action:
-                        st.markdown(dual_text("kapisirisiring", "總參與數"), unsafe_allow_html=True)
-                        st.metric("總投票紀錄", f"{vote_count} 筆", label_visibility="collapsed")
-                        st.caption(f"👍 贊成: {agree_count} | 👎 反對: {disagree_count}")
-
-                        if current_user and (current_user == "admin" or fb.get("user_id") == current_user):
-                            st.markdown("---")
-                            if st.button("opas 🗑️ 刪除整筆語料", key=f"del_{fb_id}"):
-                                ok, msg = delete_feedback_item(fb_id, current_user)
-                                if ok:
-                                    st.success(msg)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
+                    if current_user and (current_user == "admin" or fb.get("user_id") == current_user):
+                        st.markdown("---")
+                        if st.button("opas 🗑️ 刪除整筆語料", key=f"del_{fb_id}"):
+                            ok, msg = delete_feedback_item(fb_id, current_user)
+                            if ok:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
 
     except Exception as e:
         st.error(f"讀取社群資料失敗：{e}")
