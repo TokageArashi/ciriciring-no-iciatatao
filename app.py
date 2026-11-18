@@ -1315,10 +1315,60 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         else:
             current_user = st.session_state.user_info["username"] if st.session_state.user_info else None
 
-            for fb in feedbacks:
+            # --- 單字檢索：找出包含該字的例句（問句或答句），並顯示筆數與異體字 ---
+            st.markdown("#### 🔍 檢索單字用例")
+            search_raw = st.text_input(
+                "輸入單字，查找包含該字的用例（留空則顯示全部）",
+                key="fb_search_word",
+                placeholder="例如：akokay",
+            )
+            query = normalize_word(search_raw.split()[0]) if search_raw.strip() else ""
+            shown = feedbacks
+
+            if query:
+                vd = load_vote_data()
+                notes = load_word_notes()
+                site_count = build_word_index().get(query, {}).get("count", 0)
+
+                tok_sets = {
+                    fb["id"]: {normalize_word(t) for t in f"{fb.get('q_original') or ''} {fb.get('tao_text') or ''}".split()}
+                    for fb in feedbacks
+                }
+                root = vd["group_of"].get(query)
+                variants = [m for m in vd["members"].get(root, []) if m != query]
+                counts = {m: sum(1 for ts in tok_sets.values() if m in ts) for m in [query] + variants}
+
+                st.markdown(
+                    f"**「{query}」** 共有 **{counts[query]}** 筆社群例句"
+                    f"（本站總用例 {site_count} 次，含官方語料與社群例句）"
+                )
+
+                include_variants = False
+                if variants:
+                    lines = []
+                    for m in variants:
+                        desc_m = (notes.get(m) or {}).get("description")
+                        lines.append(f"- **{m}**{f'〔{desc_m}〕' if desc_m else ''}：{counts[m]} 筆")
+                    st.markdown("🔀 **有異體字**\n" + "\n".join(lines))
+                    include_variants = st.checkbox("同時顯示異體字的用例", value=True, key="fb_search_variants")
+                else:
+                    st.caption("目前沒有異體字（尚無人提出，或提出的字未通過異體字判定）。")
+
+                forms = {query, *variants} if include_variants else {query}
+                shown = [fb for fb in feedbacks if tok_sets[fb["id"]] & forms]
+                if include_variants:
+                    st.markdown(f"合計 **{len(shown)}** 筆（同一筆不重複計算）")
+                if not shown:
+                    st.info(f"找不到包含「{query}」的社群例句。")
+                st.divider()
+
+            for fb in shown:
                 fb_id = fb["id"]
 
-                with st.expander(f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"):
+                with st.expander(
+                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})",
+                    expanded=bool(query) and len(shown) <= 3,
+                ):
                     with st.container(border=True):
                         st.markdown("<div style='font-size: 16px; font-weight: bold;'>pacici (問)</div>", unsafe_allow_html=True)
                         render_interactive_sentence(
