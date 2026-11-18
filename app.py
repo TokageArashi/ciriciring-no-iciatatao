@@ -318,6 +318,7 @@ def algorithm_first_processing(user_text):
                 "user_translation": item["zh"],
                 "ai_reply_tao": item["tao"],
                 "ai_reply_zh": item["zh"],
+                "etymology": {w: "傳統詞彙用法" for w in item["tao"].split()},
                 "reference": f"【純演算法完全匹配】{item['id']} 出處: {item['source']}",
                 "is_algorithm": True,
             }
@@ -337,6 +338,7 @@ def algorithm_first_processing(user_text):
             "user_translation": best_item["zh"],
             "ai_reply_tao": best_item["tao"],
             "ai_reply_zh": best_item["zh"],
+            "etymology": {w: "傳統詞彙用法" for w in best_item["tao"].split()},
             "reference": f"【純演算法權重匹配】{best_item['id']} 出處: {best_item['source']}",
             "is_algorithm": True,
         }
@@ -344,7 +346,7 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 5. 用例與互動彈窗渲染 ---
+# --- 5. 用例與互動彈窗渲染（具備防禦性型態檢查） ---
 def count_word_occurrences(word):
     all_corpus = load_all_raw_corpus()
     count = 0
@@ -357,8 +359,12 @@ def count_word_occurrences(word):
 
 def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence"):
     """
-    渲染可點擊的單字：刪除文字標籤，改用點擊Popover呈現語源與用例介紹。
+    渲染可點擊的單字：加入防禦性型態檢查，避免 etymology_map 非 dict 時發生錯誤。
     """
+    # 確保 etymology_map 絕對是 dict，若不是則轉為空字典
+    if not isinstance(etymology_map, dict):
+        etymology_map = {}
+
     words = sentence.split()
     cols = st.columns(len(words) if words else 1)
     
@@ -366,10 +372,9 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
         clean_w = w.strip(".,!?")
         occ_count = count_word_occurrences(clean_w)
         
-        # 取得語源/意思介紹
-        word_etymology = etymology_map.get(clean_w, "傳統詞彙用法") if etymology_map else "傳統詞彙用法"
+        # 安全取值
+        word_etymology = etymology_map.get(clean_w, "傳統詞彙用法")
         
-        # 決定顏色與標籤類別
         if occ_count >= 10:
             css_class = "popover-normal"
             category_title = "官方/常用詞彙 (用例充足)"
@@ -392,7 +397,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
             st.markdown('</div>', unsafe_allow_html=True)
 
 
-# --- 6. 雙軌邏輯 (無文字標籤插入) ---
+# --- 6. 雙軌邏輯 ---
 def process_ai_input(text_prompt=None):
     if text_prompt:
         algo_result = algorithm_first_processing(text_prompt)
@@ -423,17 +428,17 @@ def process_ai_input(text_prompt=None):
 
 【絕對強制規則】：
 1. 請勿在生成的達悟語句子中包含任何如 `[使用者推薦]` 或 `[AI自創]` 的文字標籤，保持句子乾淨。
-2. 說明每一個新詞或關鍵詞的語源（例：傳統用法、日語借詞、英語借詞、中文借詞等），並放入 etymology 字典中。
+2. etymology 必須是一個 JSON 物件 (Dictionary)，鍵為達悟語單字，值為該單字的語源說明（例如：{{"akokay": "傳統問候語", "vani": "日語借詞"}}）。絕不可回傳字串。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
 {{
-  "user_recognized_tao": "使用者輸入的純達悟語句子（不帶任何文字標籤）",
+  "user_recognized_tao": "使用者輸入的純達悟語句子",
   "user_translation": "中文對照翻譯",
-  "ai_reply_tao": "達悟語回應句子（不帶任何文字標籤）",
+  "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
   "etymology": {{
-     "關鍵單字": "語源說明 (例如：傳統詞彙 / 日語借詞 / 字根組合)"
+     "關鍵單字": "語源說明"
   }},
   "is_ai_generated": true,
   "reference": "必須明確列出引用的語料庫ID與出處"
@@ -464,6 +469,10 @@ def process_ai_input(text_prompt=None):
                 result["ai_reply_tao"] = lower_first_char(result["ai_reply_tao"])
             if "is_ai_generated" not in result:
                 result["is_ai_generated"] = False
+            
+            # 確保 etymology 解析為 dict
+            if not isinstance(result.get("etymology"), dict):
+                result["etymology"] = {}
 
             return result
         except ResourceExhausted:
@@ -619,7 +628,6 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
-            # 回應結果：點擊單字即可跳出介紹視窗
             st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊單字查看語源與用例)")
             render_interactive_sentence(
                 ai_data.get("ai_reply_tao", ""), 
@@ -835,7 +843,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         """
         ### 專案願景
         本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
-
+        
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者推薦字顯示**黃色螢光筆**；AI 自創字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
