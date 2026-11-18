@@ -68,9 +68,20 @@ st.markdown(
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
-    /* 螢光筆樣式 */
-    mark.highlight-yellow { background-color: #FEF08A; color: #1F2937; padding: 2px 4px; border-radius: 4px; font-weight: bold; }
-    mark.highlight-red { background-color: #FECACA; color: #991B1B; padding: 2px 4px; border-radius: 4px; font-weight: bold; }
+    
+    /* 螢光筆彈窗按鈕樣式 */
+    div[data-testid="stPopover"] > button {
+        padding: 2px 8px !important;
+        margin: 0px 2px !important;
+        height: auto !important;
+        line-height: 1.4 !important;
+        font-size: 18px !important;
+        font-weight: bold !important;
+        border: none !important;
+    }
+    .popover-yellow > button { background-color: #FEF08A !important; color: #854D0E !important; border-radius: 4px !important; }
+    .popover-red > button { background-color: #FECACA !important; color: #991B1B !important; border-radius: 4px !important; }
+    .popover-normal > button { background-color: transparent !important; color: inherit !important; font-weight: normal !important; }
     </style>
 """,
     unsafe_allow_html=True,
@@ -333,9 +344,8 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 5. 智慧標註與高亮轉譯引擎 ---
+# --- 5. 用例與互動彈窗渲染 ---
 def count_word_occurrences(word):
-    """計算某個單字在整個語料庫中出現的用例總數"""
     all_corpus = load_all_raw_corpus()
     count = 0
     w_clean = word.lower().strip(".,!?")
@@ -345,36 +355,44 @@ def count_word_occurrences(word):
             count += 1
     return count
 
-def format_sentence_with_highlights(sentence, is_ai_generated=False, user_accepted=False):
+def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence"):
     """
-    根據規則將句子中的單字進行螢光筆標記：
-    - 已收錄或用例 >= 10：不標記
-    - 使用者推薦或用例 < 10：黃色標記
-    - AI自創字：紅色標記（若使用者未修改並同意，則改標黃色）
+    渲染可點擊的單字：刪除文字標籤，改用點擊Popover呈現語源與用例介紹。
     """
     words = sentence.split()
-    formatted_words = []
-
-    for w in words:
+    cols = st.columns(len(words) if words else 1)
+    
+    for idx, w in enumerate(words):
         clean_w = w.strip(".,!?")
         occ_count = count_word_occurrences(clean_w)
-
-        # 判斷標記類型
+        
+        # 取得語源/意思介紹
+        word_etymology = etymology_map.get(clean_w, "傳統詞彙用法") if etymology_map else "傳統詞彙用法"
+        
+        # 決定顏色與標籤類別
         if occ_count >= 10:
-            # 用例豐富，不標記
-            formatted_words.append(w)
+            css_class = "popover-normal"
+            category_title = "官方/常用詞彙 (用例充足)"
         elif is_ai_generated and not user_accepted:
-            # AI自創且未被同意：紅色標記
-            formatted_words.append(f'<mark class="highlight-red" title="AI自創字（用例: {occ_count}）">{w}</mark>')
+            css_class = "popover-red"
+            category_title = "AI自創字"
         else:
-            # 使用者推薦 或 用例不足（<10） 或 AI自創但已被同意：黃色標記
-            tag_type = "AI自創(已採納)" if is_ai_generated else "使用者推薦/低用例"
-            formatted_words.append(f'<mark class="highlight-yellow" title="{tag_type}（用例: {occ_count}）">{w}</mark>')
+            css_class = "popover-yellow"
+            category_title = "使用者推薦 / 低用例詞彙"
 
-    return " ".join(formatted_words)
+        with cols[idx]:
+            st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+            with st.popover(w, key=f"{key_prefix}_{idx}_{clean_w}"):
+                st.markdown(f"### 📖 單字詳情: **{clean_w}**")
+                st.markdown(f"- **分類狀態**: {category_title}")
+                st.markdown(f"- **語源/說明**: {word_etymology}")
+                st.markdown(f"- **語料庫用例數**: `{occ_count}` 次")
+                if occ_count < 10:
+                    st.caption("註：用例數未滿 10 次，故以螢光筆特別醒目顯示。")
+            st.markdown('</div>', unsafe_allow_html=True)
 
 
-# --- 6. 雙軌邏輯 ---
+# --- 6. 雙軌邏輯 (無文字標籤插入) ---
 def process_ai_input(text_prompt=None):
     if text_prompt:
         algo_result = algorithm_first_processing(text_prompt)
@@ -403,23 +421,20 @@ def process_ai_input(text_prompt=None):
 【唯一合規參考語料庫】:
 {corpus_context}
 
-【絕對強制規則 —— 零幻覺與逐字合規檢查】：
-1. **逐字來源核對與自創標註**：
-   - AI 回應的達悟語句子（ai_reply_tao）中的每一個單字，請優先從上方【唯一合規參考語料庫】挑選。
-   - 若概念為現代詞或語料庫中確實找不到對應詞彙，請根據達悟語借詞原則進行音譯，且該單字必須強制加上標註 `[AI自創]`。
-2. **語源與字根解析 (Etymology)**：
-   - 請在回傳結構中附帶 etymology 欄位，說明新詞或關鍵詞的來源（傳統用法 / 字根組合 / 日語借詞 / 中文借詞 / 英語借詞 / 其他）。
-3. **強制引用與查驗**：
-   - 在 reference 欄位中，必須明確寫出引用的參考句 ID 或標明「AI 備援組合生成」。
+【絕對強制規則】：
+1. 請勿在生成的達悟語句子中包含任何如 `[使用者推薦]` 或 `[AI自創]` 的文字標籤，保持句子乾淨。
+2. 說明每一個新詞或關鍵詞的語源（例：傳統用法、日語借詞、英語借詞、中文借詞等），並放入 etymology 字典中。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
 {{
-  "user_recognized_tao": "使用者輸入的達悟語或對照羅馬字",
+  "user_recognized_tao": "使用者輸入的純達悟語句子（不帶任何文字標籤）",
   "user_translation": "中文對照翻譯",
-  "ai_reply_tao": "達悟語回應句子",
+  "ai_reply_tao": "達悟語回應句子（不帶任何文字標籤）",
   "ai_reply_zh": "回應之中文翻譯",
-  "etymology": "說明新詞或回應中關鍵詞的語源（例：傳統用法、日語借詞、英語借詞等）",
+  "etymology": {{
+     "關鍵單字": "語源說明 (例如：傳統詞彙 / 日語借詞 / 字根組合)"
+  }},
   "is_ai_generated": true,
   "reference": "必須明確列出引用的語料庫ID與出處"
 }}
@@ -590,10 +605,7 @@ if main_menu == "miAI ko / 我要用AI":
             reg_val = bg_info["region"]
             reg_str = ", ".join(reg_val) if isinstance(reg_val, list) else reg_val
             user_profile_str = f"部落: {reg_str} | 年齡層: {bg_info['age_group']} | 性別: {bg_info['gender']}"
-
-            # 經過螢光筆與標記處理的回應
             is_ai = ai_data.get("is_ai_generated", False)
-            formatted_reply_tao = format_sentence_with_highlights(ai_data.get("ai_reply_tao", ""), is_ai_generated=is_ai, user_accepted=False)
 
             st.markdown("---")
             st.markdown(
@@ -607,17 +619,16 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
-            st.markdown(
-                f"""
-                <div style="padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                    <div style="font-size: 18px; font-weight: bold;">maniring o AI/演算法 am (回應結果 - 帶螢光筆標記)</div>
-                    <div style="font-size: 18px; font-weight: bold; margin-top: 5px;">{formatted_reply_tao}</div>
-                    <div style="font-size: 14px; opacity: 0.8; margin-top: 4px;"><b>語源/字根解析 (Etymology):</b> {ai_data.get('etymology', '傳統用法/未特別標註')}</div>
-                    <div style="font-size: 13px; color: #6B7280; margin-top: 2px;">💡 提示：黃色標記代表使用者推薦或用例不足10筆；紅色代表AI自創字。</div>
-                </div>
-                """,
-                unsafe_allow_html=True
+            # 回應結果：點擊單字即可跳出介紹視窗
+            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊單字查看語源與用例)")
+            render_interactive_sentence(
+                ai_data.get("ai_reply_tao", ""), 
+                is_ai_generated=is_ai, 
+                user_accepted=False, 
+                etymology_map=ai_data.get("etymology", {}),
+                key_prefix="main_reply"
             )
+            st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
 
             st.markdown(
                 f"""
@@ -651,7 +662,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=False,
                         is_error=False,
                     ):
-                        st.success("🎉 已成功儲存！若含 AI 自創字因您直接採納，將自動降為黃色標記顯示。")
+                        st.success("🎉 已成功儲存！若包含 AI 自創字因您直接採納，後續將自動轉為黃色標記。")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -732,16 +743,14 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             unsafe_allow_html=True
                         )
 
-                        st.markdown(
-                            f"""
-                            <div style="padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                                <div style="font-size: 16px; font-weight: bold;">tovis (答 - 單字用法驗證)</div>
-                                <div style="font-size: 18px; font-weight: bold; margin-top: 4px;">{fb.get('tao_text')}</div>
-                                <div style="font-size: 14px; opacity: 0.8;">{fb.get('zh_text')}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
+                        st.markdown("##### tovis (答 - 點擊單字查看語源介紹)")
+                        render_interactive_sentence(
+                            fb.get('tao_text', ''),
+                            is_ai_generated=False,
+                            user_accepted=True,
+                            key_prefix=f"fb_{fb_id}"
                         )
+                        st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-bottom: 8px;'>{fb.get('zh_text')}</div>", unsafe_allow_html=True)
 
                         st.markdown(
                             f"""
