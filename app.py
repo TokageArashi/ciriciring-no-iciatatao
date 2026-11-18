@@ -187,6 +187,7 @@ def save_語料_to_supabase(
     r_zh,
     is_edited=False,
     is_error=False,
+    pending_sentence_id=None,
 ):
     try:
         region_val = bg_info["region"]
@@ -210,7 +211,22 @@ def save_語料_to_supabase(
             "error_count": 1 if is_error else 0,
             "timestamp": datetime.datetime.now().isoformat(),
         }
-        supabase.from_("feedback").insert(data).execute()
+        res_ins = supabase.from_("feedback").insert(data).execute()
+        build_word_index.clear()
+
+        # 使用者若在「尚未儲存」的回應句上投過票，句子存檔（且未修改）後，
+        # 把那些票改掛到新例句的 id，這樣同一句不會在例句頁被重複投票。
+        if pending_sentence_id and not is_edited and res_ins.data:
+            try:
+                new_id = res_ins.data[0].get("id")
+                if new_id:
+                    supabase.from_("community_votes").update({"feedback_id": new_id}).eq(
+                        "feedback_id", 0
+                    ).like("hidden_suggestion", f"%sent:{pending_sentence_id}%").execute()
+                    load_votes_index.clear()
+                    load_user_votes.clear()
+            except Exception:
+                pass
         return True
     except Exception as e:
         st.error(f"寫入 Supabase 失敗：{e}")
@@ -232,10 +248,11 @@ def delete_feedback_item(feedback_id, current_username):
         if current_username != "admin" and owner_id != current_username:
             return False, "權限不足：您只能刪除自己提供的資料！"
 
-        supabase.from_("community_votes").delete().eq(
-            "feedback_id", feedback_id
-        ).execute()
+        # 只刪例句本身：該句產生的投票（community_votes）刻意保留，
+        # 用例數則因為例句消失而自動扣除（見 build_word_index）。
         supabase.from_("feedback").delete().eq("id", feedback_id).execute()
+        build_word_index.clear()
+        load_all_raw_corpus.clear()
         return True, "刪除成功！"
     except Exception as e:
         return False, f"刪除失敗：{e}"
@@ -286,6 +303,7 @@ def load_all_raw_corpus():
                         "tao": r.get("tao_text", ""),
                         "zh": r.get("zh_text", ""),
                         "source": f"社群驗證 (提供者: {r.get('user_id', '匿名')})",
+                        "is_feedback": True,
                         "full_text": f"{r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
                     }
                 )
@@ -395,12 +413,34 @@ def split_token(token):
 
 @st.cache_data(ttl=300)
 def build_word_index():
-    """單字 -> {'count': 出現在幾筆語料中, 'zh': 第一筆例句翻譯}。整個語料庫只掃一次。"""
+    """
+    單字 -> {'count': 在本網站出現的總次數, 'zh': 一則例句翻譯}。
+    來源 = 官方語料庫 + feedback 表中所有已儲存的例句（使用者輸入 q_original 與回應 tao_text）。
+    同一句用到兩次就算兩次；例句被刪除後，下次重算時自然扣掉。
+    """
     index = {}
-    for item in load_all_raw_corpus():
-        for w in {normalize_word(t) for t in item["tao"].split()} - {""}:
-            entry = index.setdefault(w, {"count": 0, "zh": item["zh"]})
+
+    def add(text, zh):
+        for tok in (text or "").split():
+            w = normalize_word(tok)
+            if not w:
+                continue
+            entry = index.setdefault(w, {"count": 0, "zh": zh})
             entry["count"] += 1
+
+    # 官方語料；已驗證而併入語料的 feedback 略過，改由下面的 feedback 全量計算，避免重複
+    for item in load_all_raw_corpus():
+        if not item.get("is_feedback"):
+            add(item["tao"], item["zh"])
+
+    try:
+        res = supabase.from_("feedback").select("q_original, q_trans, tao_text, zh_text").execute()
+        for r in res.data or []:
+            add(r.get("q_original"), r.get("q_trans"))
+            add(r.get("tao_text"), r.get("zh_text"))
+    except Exception:
+        pass
+
     return index
 
 
@@ -430,6 +470,49 @@ def load_votes_index():
     return index
 
 
+def sentence_key(fb_id, sentence_id):
+    """例句的唯一識別：已儲存 -> feedback id；尚未儲存的回應句 -> 這次生成的暫時 id。"""
+    if fb_id:
+        return f"fb:{fb_id}"
+    if sentence_id:
+        return f"tmp:{sentence_id}"
+    return None
+
+
+def _fetch_user_votes(voter_id):
+    """直接查 Supabase：回傳這個帳號已投過的 {(例句識別, 單字)}。查詢失敗會丟出例外。"""
+    res = (
+        supabase.from_("community_votes")
+        .select("feedback_id, hidden_suggestion")
+        .eq("voter_id", voter_id)
+        .execute()
+    )
+    keys = set()
+    for v in res.data or []:
+        sug = str(v.get("hidden_suggestion", "") or "").lower()
+        m = re.search(r"word_key:(.+?)\s*(?:\||$)", sug)
+        if not m:
+            continue
+        word = m.group(1).strip()
+        fid = v.get("feedback_id")
+        if fid:
+            keys.add((f"fb:{fid}", word))
+        else:
+            s = re.search(r"sent:([0-9a-f]+)", sug)
+            if s:
+                keys.add((f"tmp:{s.group(1)}", word))
+    return keys
+
+
+@st.cache_data(ttl=30)
+def load_user_votes(voter_id):
+    """顯示用（有短暫快取）；真正送出投票時會改用 _fetch_user_votes 重查。"""
+    try:
+        return _fetch_user_votes(voter_id)
+    except Exception:
+        return set()
+
+
 def classify_word(count, in_user_input, is_ai_generated, user_accepted):
     """回傳 None（一般單字）、'yellow'、'red'。"""
     if count > HIGHLIGHT_THRESHOLD:
@@ -446,13 +529,16 @@ def _plain(text, css_class="tao-w"):
     st.markdown(f'<span class="{css_class}">{html.escape(text)}</span>', unsafe_allow_html=True)
 
 
-def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None, user_input_text=""):
+def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None, user_input_text="", sentence_id=None):
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
     word_index = build_word_index()
     votes_index = load_votes_index()
     user_words = {normalize_word(t) for t in (user_input_text or "").split()} - {""}
+
+    skey = sentence_key(fb_id, sentence_id)
+    my_votes = load_user_votes(current_user) if (enable_word_voting and current_user) else set()
 
     # 這個 container 會被 CSS 排成「一行、自動換行」的句子（見頁首 CSS）
     with st.container(key=f"sent_{key_prefix}"):
@@ -483,15 +569,18 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         st.markdown(f"- **分類**: {category_title}")
                         if etymology_text and example_zh:
                             st.markdown(f"- **語源說明**: {etymology_text}")
-                        st.markdown(f"- **全站總用例數**: `{occ_count}` 次")
+                        st.markdown(f"- **本站總用例數**: `{occ_count}` 次")
 
                         st.divider()
                         st.markdown(f"#### 📊 全站投票統計 (`{clean_w}`)")
-                        st.markdown(f"👍 **贊成票**: `{v['agree']}` 票 | 👎 **反對票**: `{v['disagree']}` 票")
+                        total_agree = occ_count + v["agree"]  # 站上用例數 + 另外投票贊同的人數
+                        st.markdown(f"👍 **贊成票**: `{total_agree}` 票（用例 {occ_count} ＋ 投票 {v['agree']}） | 👎 **反對票**: `{v['disagree']}` 票")
                         if v["suggestions"]:
                             st.markdown(f"- **社群推薦替代詞**: {', '.join(set(v['suggestions']))}")
 
-                        if enable_word_voting and current_user:
+                        if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
+                            st.info(f"✅ 您已對本句的「{w}」投過票了")
+                        elif enable_word_voting and current_user:
                             st.markdown(f"#### 🗳️ 為單字 [{w}] 投票")
                             w_choice = st.radio(
                                 f"您是否贊成「{w}」的用法？",
@@ -507,11 +596,18 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
                             if st.button(f"送出 [{w}] 投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
                                 try:
+                                    # 送出前重新查一次，確保「同帳號、同例句、同單字」只有一票
+                                    load_user_votes.clear()
+                                    if skey and (skey, clean_w) in _fetch_user_votes(current_user):
+                                        raise ValueError(f"您已對本句的「{w}」投過票，無法重複投票。")
+
                                     voter_info = st.session_state.user_info
                                     voter_region = voter_info.get("region", "未知")
                                     voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
 
-                                    suggestion_content = f"word_key:{clean_w} | 替代詞: {w_alt_input}" if w_alt_input else f"word_key:{clean_w} | {w_choice}"
+                                    # 尚未儲存的回應句用 sent:<暫時id> 標記是哪一句
+                                    sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
+                                    suggestion_content = f"word_key:{clean_w}{sent_part} | 替代詞: {w_alt_input}" if w_alt_input else f"word_key:{clean_w}{sent_part} | {w_choice}"
 
                                     supabase.from_("community_votes").insert({
                                         "feedback_id": fb_id if fb_id else 0,
@@ -524,6 +620,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }).execute()
                                     load_votes_index.clear()
+                                    load_user_votes.clear()
                                     st.success(f"🎉 單字 [{w}] 全站投票已成功記錄！")
                                     st.rerun()
                                 except Exception as vote_err:
@@ -738,6 +835,7 @@ if main_menu == "miAI ko / 我要用AI":
                     ai_data = process_ai_input(text_prompt=text_input)
                     if ai_data:
                         st.session_state.active_q = text_input
+                        ai_data["sentence_id"] = uuid.uuid4().hex  # 這一句回應的暫時識別
                         st.session_state.ai_data = ai_data
                         st.session_state.active_bg = current_bg
 
@@ -772,7 +870,8 @@ if main_menu == "miAI ko / 我要用AI":
                 key_prefix="main_reply",
                 enable_word_voting=True,
                 current_user=st.session_state.user_info["username"],
-                user_input_text=ai_data.get("user_recognized_tao", q_orig)
+                user_input_text=ai_data.get("user_recognized_tao", q_orig),
+                sentence_id=ai_data.get("sentence_id")
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
 
@@ -807,6 +906,7 @@ if main_menu == "miAI ko / 我要用AI":
                         ai_data.get("ai_reply_zh"),
                         is_edited=False,
                         is_error=False,
+                        pending_sentence_id=ai_data.get("sentence_id"),
                     ):
                         st.success("🎉 已成功儲存！")
                         del st.session_state.ai_data
