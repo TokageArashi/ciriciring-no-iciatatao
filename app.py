@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import html
 import json
 import os
 import re
@@ -69,34 +70,48 @@ st.markdown(
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
     
-    /* 模仿中文輸入法選字彈窗樣式：單字緊密流暢相連 */
-    .tao-sentence-container {
-        font-size: 20px;
-        font-weight: bold;
-        line-height: 2.0;
-        display: inline;
+    :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: wrap !important;
+        align-items: baseline !important;
+        gap: 0 !important;
+        width: 100% !important;
     }
-    div[data-testid="stPopover"] {
-        display: inline !important;
-        margin: 0px 1px !important;
+    /* 句子流式排列：把 container 內每個單字（純文字或 popover）排成同一行並自動換行 */
+    :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]) {
+        width: auto !important;
+        flex: 0 0 auto !important;
+        min-width: 0 !important;
+        margin: 0 0 0 0.3em !important;
     }
-    div[data-testid="stPopover"] > button {
-        background-color: transparent !important;
-        color: inherit !important;
+    :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]):first-child { margin-left: 0 !important; }
+    :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]):has(.tao-punct) { margin-left: 0 !important; }
+    :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]):has(.tao-lead) + * { margin-left: 0 !important; }
+    :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]) [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
+    .tao-w, .tao-punct, .tao-lead { font-size: 20px; font-weight: bold; line-height: 2.0; }
+
+    /* 螢光標籤單字（popover 按鈕）：Y = 黃色、R = 紅色 */
+    [class*="_hlY_"] button, [class*="_hlR_"] button {
         border: none !important;
-        padding: 0px 4px !important;
+        box-shadow: none !important;
+        color: inherit !important;
         height: auto !important;
         min-height: unset !important;
-        line-height: 1.5 !important;
+        padding: 0 0.25em !important;
+        line-height: 1.6 !important;
         font-size: 20px !important;
         font-weight: bold !important;
-        box-shadow: none !important;
+        border-radius: 4px !important;
+        cursor: pointer;
     }
-    div[data-testid="stPopover"] > button:hover {
-        color: #3B82F6 !important;
-        background-color: rgba(59, 130, 246, 0.1) !important;
-        border-radius: 4px;
-    }
+    [class*="_hlY_"] button p, [class*="_hlR_"] button p { font-size: 20px !important; margin: 0 !important; }
+    [class*="_hlY_"] button svg, [class*="_hlR_"] button svg,
+    [class*="_hlY_"] button [data-testid="stIconMaterial"], [class*="_hlR_"] button [data-testid="stIconMaterial"] { display: none !important; }
+    [class*="_hlY_"] button { background-color: rgba(250, 204, 21, 0.55) !important; }
+    [class*="_hlY_"] button:hover { background-color: rgba(250, 204, 21, 0.85) !important; }
+    [class*="_hlR_"] button { background-color: rgba(239, 68, 68, 0.50) !important; }
+    [class*="_hlR_"] button:hover { background-color: rgba(239, 68, 68, 0.80) !important; }
     </style>
 """,
     unsafe_allow_html=True,
@@ -361,132 +376,161 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 5. 跨語料單字統一投票與中文解釋檢索機制 ---
-def count_word_occurrences(word):
-    all_corpus = load_all_raw_corpus()
-    count = 0
-    w_clean = word.lower().strip(".,!?")
-    for item in all_corpus:
-        words_in_item = re.findall(r"\w+", item["tao"].lower())
-        if w_clean in words_in_item:
-            count += 1
-    return count
+# --- 5. 單字用例統計、螢光標註與投票 ---
+HIGHLIGHT_THRESHOLD = 10  # 用例 <= 10 → 黃色；> 10 → 一般單字不標示
+WORD_STRIP_CHARS = ".,!?;:\"“”()[]「」『』。，！？；：、…"
 
-def get_word_chinese_meaning(word, default_zh=""):
-    w_clean = word.lower().strip(".,!?")
-    all_corpus = load_all_raw_corpus()
-    for item in all_corpus:
-        if w_clean in item["tao"].lower():
-            return f"例句翻譯: {item['zh']}"
-    return default_zh or "暫無中文說明"
 
-def get_word_global_votes(word):
-    """
-    透過正規表達式嚴格抓取全站針對該標準化小寫單字的投票記錄，確保跨例句數值完全一致
-    """
-    w_clean = word.lower().strip(".,!?")
+def normalize_word(token):
+    """全站統一的單字識別：去除頭尾標點並轉小寫。"""
+    return token.strip(WORD_STRIP_CHARS).lower()
+
+
+def split_token(token):
+    """把 'akokay,' 拆成 (前標點, 單字, 後標點)。"""
+    esc = re.escape(WORD_STRIP_CHARS)
+    m = re.match(rf"^([{esc}]*)(.*?)([{esc}]*)$", token)
+    return m.group(1), m.group(2), m.group(3)
+
+
+@st.cache_data(ttl=300)
+def build_word_index():
+    """單字 -> {'count': 出現在幾筆語料中, 'zh': 第一筆例句翻譯}。整個語料庫只掃一次。"""
+    index = {}
+    for item in load_all_raw_corpus():
+        for w in {normalize_word(t) for t in item["tao"].split()} - {""}:
+            entry = index.setdefault(w, {"count": 0, "zh": item["zh"]})
+            entry["count"] += 1
+    return index
+
+
+@st.cache_data(ttl=30)
+def load_votes_index():
+    """單字 -> {'agree', 'disagree', 'suggestions'}。全站投票只查一次 Supabase。"""
+    index = {}
     try:
         res = supabase.from_("community_votes").select("vote_result, hidden_suggestion").execute()
-        votes = res.data if res.data else []
-        
-        agree = 0
-        disagree = 0
-        suggestions = []
-        for v in votes:
-            sug = str(v.get("hidden_suggestion", "")).lower()
-            # 檢查標籤中是否精準包含 word_key:w_clean 或是傳統格式 [w_clean]
-            if f"word_key:{w_clean}" in sug or f"[{w_clean}]" in sug:
-                if v.get("vote_result") == "贊同":
-                    agree += 1
-                elif v.get("vote_result") == "不贊同":
-                    disagree += 1
-                if "替代詞:" in sug:
-                    alt = sug.split("替代詞:")[-1].strip()
-                    if alt:
-                        suggestions.append(alt)
-        return agree, disagree, suggestions
     except Exception:
-        return 0, 0, []
+        return index
 
-def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None):
+    for v in res.data or []:
+        sug = str(v.get("hidden_suggestion", "") or "").lower()
+        m = re.search(r"word_key:(.+?)\s*(?:\||$)", sug) or re.search(r"\[(.+?)\]", sug)
+        if not m:
+            continue
+        entry = index.setdefault(m.group(1).strip(), {"agree": 0, "disagree": 0, "suggestions": []})
+        if v.get("vote_result") == "贊同":
+            entry["agree"] += 1
+        elif v.get("vote_result") == "不贊同":
+            entry["disagree"] += 1
+        if "替代詞:" in sug:
+            alt = sug.split("替代詞:")[-1].strip()
+            if alt:
+                entry["suggestions"].append(alt)
+    return index
+
+
+def classify_word(count, in_user_input, is_ai_generated, user_accepted):
+    """回傳 None（一般單字）、'yellow'、'red'。"""
+    if count > HIGHLIGHT_THRESHOLD:
+        return None
+    if count == 0:
+        if in_user_input:
+            return "yellow"  # 使用者輸入、語料庫沒有
+        if is_ai_generated and not user_accepted:
+            return "red"  # AI 自創
+    return "yellow"  # 用例不超過 10 例 / 已被採納的自創字
+
+
+def _plain(text, css_class="tao-w"):
+    st.markdown(f'<span class="{css_class}">{html.escape(text)}</span>', unsafe_allow_html=True)
+
+
+def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None, user_input_text=""):
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
-    words = sentence.split()
-    
-    st.markdown('<div class="tao-sentence-container">', unsafe_allow_html=True)
-    
-    for idx, w in enumerate(words):
-        clean_w = w.strip(".,!?").lower() # 嚴格轉為小寫作為全站統一識別字
-        occ_count = count_word_occurrences(clean_w)
-        
-        etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
-        zh_meaning = get_word_chinese_meaning(clean_w, default_zh=etymology_text)
-        
-        if occ_count >= 10:
-            category_title = "官方/常用詞彙 (用例充足)"
-        elif is_ai_generated and not user_accepted:
-            category_title = "AI自創字"
-        else:
-            category_title = "使用者推薦 / 低用例詞彙"
+    word_index = build_word_index()
+    votes_index = load_votes_index()
+    user_words = {normalize_word(t) for t in (user_input_text or "").split()} - {""}
 
-        # 取得全站跨例句統一票數
-        g_agree, g_disagree, g_suggestions = get_word_global_votes(clean_w)
+    # 這個 container 會被 CSS 排成「一行、自動換行」的句子（見頁首 CSS）
+    with st.container(key=f"sent_{key_prefix}"):
+        for idx, token in enumerate((sentence or "").split()):
+            lead, w, trail = split_token(token)
+            if lead:
+                _plain(lead, "tao-lead")
 
-        with st.popover(w, key=f"{key_prefix}_{idx}_{w}"):
-            st.markdown(f"### 🔠 單字詳情: **{w}**")
-            st.markdown(f"- **中文解釋**: {zh_meaning}")
-            st.markdown(f"- **分類**: {category_title}")
-            if etymology_text:
-                st.markdown(f"- **語源說明**: {etymology_text}")
-            st.markdown(f"- **全站總用例數**: `{occ_count}` 次")
-            
-            st.divider()
-            st.markdown(f"#### 📊 全站跨例句投票統計 (`{clean_w}`)")
-            st.markdown(f"👍 **贊成票**: `{g_agree}` 票 | 👎 **反對票**: `{g_disagree}` 票")
-            if g_suggestions:
-                st.markdown(f"- **社群推薦替代詞**: {', '.join(set(g_suggestions))}")
+            if w:
+                clean_w = w.lower()
+                info = word_index.get(clean_w, {})
+                occ_count = info.get("count", 0)
+                level = classify_word(occ_count, clean_w in user_words, is_ai_generated, user_accepted)
 
-            if enable_word_voting and current_user:
-                st.markdown(f"#### 🗳️ 為單字 [{w}] 投票")
-                w_choice = st.radio(
-                    f"您是否贊成「{w}」的用法？",
-                    ["贊同", "不贊同"],
-                    key=f"w_choice_{key_prefix}_{idx}_{w}",
-                    horizontal=True,
-                )
-                w_alt_input = st.text_input(
-                    f"若不贊同，請提出「{w}」的替代詞：",
-                    key=f"w_alt_{key_prefix}_{idx}_{w}",
-                    placeholder="輸入建議替代詞...",
-                )
-                
-                if st.button(f"送出 [{w}] 投票", key=f"btn_w_vote_{key_prefix}_{idx}_{w}"):
-                    try:
-                        voter_info = st.session_state.user_info
-                        voter_region = voter_info.get("region", "未知")
-                        voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
+                if level is None:
+                    _plain(w)  # 一般單字：不標示、不可點擊
+                else:
+                    etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
+                    example_zh = info.get("zh")
+                    zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
+                    category_title = "🔴 AI 自創字" if level == "red" else "🟡 使用者輸入 / 低用例詞彙"
+                    v = votes_index.get(clean_w, {"agree": 0, "disagree": 0, "suggestions": []})
+                    tag = "hlR" if level == "red" else "hlY"
 
-                        # 寫入明確的全站統一標記 word_key:clean_w
-                        suggestion_content = f"word_key:{clean_w} | 替代詞: {w_alt_input}" if w_alt_input else f"word_key:{clean_w} | {w_choice}"
+                    with st.popover(w, key=f"{key_prefix}_{tag}_{idx}"):
+                        st.markdown(f"### 🔠 單字詳情: **{w}**")
+                        st.markdown(f"- **中文解釋**: {zh_meaning}")
+                        st.markdown(f"- **分類**: {category_title}")
+                        if etymology_text and example_zh:
+                            st.markdown(f"- **語源說明**: {etymology_text}")
+                        st.markdown(f"- **全站總用例數**: `{occ_count}` 次")
 
-                        w_vote_record = {
-                            "feedback_id": fb_id if fb_id else 0,
-                            "voter_id": current_user,
-                            "region": voter_region_str,
-                            "age_group": voter_info.get("age_group", "未知"),
-                            "gender": voter_info.get("gender", "未知"),
-                            "vote_result": w_choice,
-                            "hidden_suggestion": suggestion_content,
-                            "timestamp": datetime.datetime.now().isoformat(),
-                        }
-                        supabase.from_("community_votes").insert(w_vote_record).execute()
-                        st.success(f"🎉 單字 [{w}] 全站投票已成功記錄！")
-                        st.rerun()
-                    except Exception as vote_err:
-                        st.error(f"投票失敗：{vote_err}")
-        
-    st.markdown('</div>', unsafe_allow_html=True)
+                        st.divider()
+                        st.markdown(f"#### 📊 全站投票統計 (`{clean_w}`)")
+                        st.markdown(f"👍 **贊成票**: `{v['agree']}` 票 | 👎 **反對票**: `{v['disagree']}` 票")
+                        if v["suggestions"]:
+                            st.markdown(f"- **社群推薦替代詞**: {', '.join(set(v['suggestions']))}")
+
+                        if enable_word_voting and current_user:
+                            st.markdown(f"#### 🗳️ 為單字 [{w}] 投票")
+                            w_choice = st.radio(
+                                f"您是否贊成「{w}」的用法？",
+                                ["贊同", "不贊同"],
+                                key=f"w_choice_{key_prefix}_{idx}",
+                                horizontal=True,
+                            )
+                            w_alt_input = st.text_input(
+                                f"若不贊同，請提出「{w}」的替代詞：",
+                                key=f"w_alt_{key_prefix}_{idx}",
+                                placeholder="輸入建議替代詞...",
+                            )
+
+                            if st.button(f"送出 [{w}] 投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
+                                try:
+                                    voter_info = st.session_state.user_info
+                                    voter_region = voter_info.get("region", "未知")
+                                    voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
+
+                                    suggestion_content = f"word_key:{clean_w} | 替代詞: {w_alt_input}" if w_alt_input else f"word_key:{clean_w} | {w_choice}"
+
+                                    supabase.from_("community_votes").insert({
+                                        "feedback_id": fb_id if fb_id else 0,
+                                        "voter_id": current_user,
+                                        "region": voter_region_str,
+                                        "age_group": voter_info.get("age_group", "未知"),
+                                        "gender": voter_info.get("gender", "未知"),
+                                        "vote_result": w_choice,
+                                        "hidden_suggestion": suggestion_content,
+                                        "timestamp": datetime.datetime.now().isoformat(),
+                                    }).execute()
+                                    load_votes_index.clear()
+                                    st.success(f"🎉 單字 [{w}] 全站投票已成功記錄！")
+                                    st.rerun()
+                                except Exception as vote_err:
+                                    st.error(f"投票失敗：{vote_err}")
+
+            if trail:
+                _plain(trail, "tao-punct")
 
 
 # --- 6. 雙軌邏輯 ---
@@ -719,7 +763,7 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
-            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任意單字開啟中文解釋與選字窗)")
+            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊有螢光標籤的單字查看說明與投票)")
             render_interactive_sentence(
                 ai_data.get("ai_reply_tao", ""), 
                 is_ai_generated=is_ai, 
@@ -727,7 +771,8 @@ if main_menu == "miAI ko / 我要用AI":
                 etymology_map=ai_data.get("etymology", {}),
                 key_prefix="main_reply",
                 enable_word_voting=True,
-                current_user=st.session_state.user_info["username"]
+                current_user=st.session_state.user_info["username"],
+                user_input_text=ai_data.get("user_recognized_tao", q_orig)
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
 
@@ -824,7 +869,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         unsafe_allow_html=True
                     )
 
-                    st.markdown("##### tovis (答 - 點擊任一單字即可開啟中文解釋與獨立單字投票)")
+                    st.markdown("##### tovis (答 - 點擊有螢光標籤的單字即可查看說明與投票)")
                     
                     render_interactive_sentence(
                         fb.get('tao_text', ''),
