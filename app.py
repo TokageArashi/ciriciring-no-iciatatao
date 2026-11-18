@@ -856,7 +856,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         st.error(f"讀取社群資料失敗：{e}")
 
 elif main_menu == "amian so AI ori / 關於本站":
-    st.subheader(f"🏝️ 關於 🏝️ 達悟文語料庫&AI訓練
+    st.subheader(f"🏝️ 關於 🏝️ 達悟文語料庫&AI訓練)
     st.markdown(
         """
         ### 專案願景
