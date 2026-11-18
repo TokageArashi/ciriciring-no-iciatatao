@@ -69,23 +69,37 @@ st.markdown(
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
     
-    /* 螢光筆彈窗按鈕樣式（保持文字流暢嵌入） */
+    /* 螢光筆彈窗按鈕樣式（完美重現黃色與紅色螢光底色） */
     div[data-testid="stPopover"] {
         display: inline-block !important;
-        margin: 0px 2px !important;
+        margin: 0px 3px !important;
     }
     div[data-testid="stPopover"] > button {
-        padding: 2px 6px !important;
+        padding: 3px 8px !important;
         height: auto !important;
         min-height: unset !important;
-        line-height: 1.3 !important;
+        line-height: 1.4 !important;
         font-size: 18px !important;
         font-weight: bold !important;
         border: none !important;
+        border-radius: 4px !important;
     }
-    .popover-yellow > div[data-testid="stPopover"] > button { background-color: #FEF08A !important; color: #854D0E !important; border-radius: 4px !important; }
-    .popover-red > div[data-testid="stPopover"] > button { background-color: #FECACA !important; color: #991B1B !important; border-radius: 4px !important; }
-    .popover-normal > div[data-testid="stPopover"] > button { background-color: transparent !important; color: inherit !important; font-weight: normal !important; }
+    /* 黃色螢光筆：使用者推薦 / 低用例 */
+    .popover-yellow > div[data-testid="stPopover"] > button { 
+        background-color: #FEF08A !important; 
+        color: #854D0E !important; 
+    }
+    /* 紅色螢光筆：AI自創字 */
+    .popover-red > div[data-testid="stPopover"] > button { 
+        background-color: #FECACA !important; 
+        color: #991B1B !important; 
+    }
+    /* 正常文字：用例充足 */
+    .popover-normal > div[data-testid="stPopover"] > button { 
+        background-color: transparent !important; 
+        color: inherit !important; 
+        font-weight: normal !important; 
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -363,16 +377,14 @@ def count_word_occurrences(word):
 
 def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None):
     """
-    將句子中的每一個單字渲染為獨立的 st.popover。
-    點擊單字可開啟專屬小視窗，檢視語源、用例次數，若啟用單字投票則可直接在小視窗內投票。
+    將句子中的每一個單字渲染為帶有螢光底色的獨立 st.popover 按鈕，整句流暢連在一起。
     """
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
     words = sentence.split()
     
-    # 為了保持排版流暢，使用 inline 區塊排版
-    st.markdown('<div style="font-size: 20px; font-weight: bold; line-height: 2.2;">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size: 20px; font-weight: bold; line-height: 2.5; display: flex; flex-wrap: wrap; align-items: center; gap: 4px;">', unsafe_allow_html=True)
     
     for idx, w in enumerate(words):
         clean_w = w.strip(".,!?")
@@ -389,20 +401,17 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
             css_class = "popover-yellow"
             category_title = "使用者推薦 / 低用例詞彙"
 
-        # 每個單字包在獨立的 popover 中，互不干擾
-        st.markdown(f'<span class="{css_class}">', unsafe_allow_html=True)
+        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
         with st.popover(w, key=f"{key_prefix}_{idx}_{clean_w}"):
             st.markdown(f"### 📖 單字詳情: **{clean_w}**")
             st.markdown(f"- **分類狀態**: {category_title}")
             st.markdown(f"- **語源/說明**: {word_etymology}")
             st.markdown(f"- **語料庫用例數**: `{occ_count}` 次")
             
-            # 若啟用單字投票模式（在「看別人用AI」頁面）
             if enable_word_voting and fb_id and current_user:
                 st.divider()
                 st.markdown(f"#### 🗳️ 單字 [{clean_w}] 用法投票")
                 
-                # 撈取該 word 專屬的投票統計
                 try:
                     res_word_votes = supabase.from_("community_votes").select("*").eq("feedback_id", fb_id).execute()
                     w_votes = res_word_votes.data if res_word_votes.data else []
@@ -444,7 +453,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                 except Exception as vote_err:
                     st.error(f"載入單字投票失敗：{vote_err}")
             
-        st.markdown('</span>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
         
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -679,7 +688,7 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
-            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任意單字查看詳情)")
+            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任意帶有螢光底色的單字查看詳情)")
             render_interactive_sentence(
                 ai_data.get("ai_reply_tao", ""), 
                 is_ai_generated=is_ai, 
@@ -803,7 +812,6 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
                         st.markdown("##### tovis (答 - 點擊任一單字即可在小視窗內檢視語源並進行單字投票)")
                         
-                        # 啟用單字獨立投票功能
                         render_interactive_sentence(
                             fb.get('tao_text', ''),
                             is_ai_generated=False,
