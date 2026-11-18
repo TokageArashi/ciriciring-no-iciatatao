@@ -15,7 +15,6 @@ from supabase import Client, create_client
 
 # --- 輔助函式：上下雙語排版用 ---
 def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
-    """產生上方達悟文（稍大）、下方中文的雙語對照 HTML 結構"""
     size_tao = "22px" if is_title else "18px"
     size_zh = "16px" if is_title else "14px"
     return f"""
@@ -26,7 +25,6 @@ def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
     """
 
 def lower_first_char(text: str) -> str:
-    """將字串的第一個字元轉為小寫"""
     if not text:
         return text
     return text[0].lower() + text[1:]
@@ -70,6 +68,9 @@ st.markdown(
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
+    /* 螢光筆樣式 */
+    mark.highlight-yellow { background-color: #FEF08A; color: #1F2937; padding: 2px 4px; border-radius: 4px; font-weight: bold; }
+    mark.highlight-red { background-color: #FECACA; color: #991B1B; padding: 2px 4px; border-radius: 4px; font-weight: bold; }
     </style>
 """,
     unsafe_allow_html=True,
@@ -332,7 +333,48 @@ def algorithm_first_processing(user_text):
     return None
 
 
-# --- 5. 雙軌邏輯 ---
+# --- 5. 智慧標註與高亮轉譯引擎 ---
+def count_word_occurrences(word):
+    """計算某個單字在整個語料庫中出現的用例總數"""
+    all_corpus = load_all_raw_corpus()
+    count = 0
+    w_clean = word.lower().strip(".,!?")
+    for item in all_corpus:
+        words_in_item = re.findall(r"\w+", item["tao"].lower())
+        if w_clean in words_in_item:
+            count += 1
+    return count
+
+def format_sentence_with_highlights(sentence, is_ai_generated=False, user_accepted=False):
+    """
+    根據規則將句子中的單字進行螢光筆標記：
+    - 已收錄或用例 >= 10：不標記
+    - 使用者推薦或用例 < 10：黃色標記
+    - AI自創字：紅色標記（若使用者未修改並同意，則改標黃色）
+    """
+    words = sentence.split()
+    formatted_words = []
+
+    for w in words:
+        clean_w = w.strip(".,!?")
+        occ_count = count_word_occurrences(clean_w)
+
+        # 判斷標記類型
+        if occ_count >= 10:
+            # 用例豐富，不標記
+            formatted_words.append(w)
+        elif is_ai_generated and not user_accepted:
+            # AI自創且未被同意：紅色標記
+            formatted_words.append(f'<mark class="highlight-red" title="AI自創字（用例: {occ_count}）">{w}</mark>')
+        else:
+            # 使用者推薦 或 用例不足（<10） 或 AI自創但已被同意：黃色標記
+            tag_type = "AI自創(已採納)" if is_ai_generated else "使用者推薦/低用例"
+            formatted_words.append(f'<mark class="highlight-yellow" title="{tag_type}（用例: {occ_count}）">{w}</mark>')
+
+    return " ".join(formatted_words)
+
+
+# --- 6. 雙軌邏輯 ---
 def process_ai_input(text_prompt=None):
     if text_prompt:
         algo_result = algorithm_first_processing(text_prompt)
@@ -365,19 +407,21 @@ def process_ai_input(text_prompt=None):
 1. **逐字來源核對與自創標註**：
    - AI 回應的達悟語句子（ai_reply_tao）中的每一個單字，請優先從上方【唯一合規參考語料庫】挑選。
    - 若概念為現代詞或語料庫中確實找不到對應詞彙，請根據達悟語借詞原則進行音譯，且該單字必須強制加上標註 `[AI自創]`。
-2. **使用者輸入與自創字處理**：
-   - 若使用者輸入了語料庫沒有的自創字或異體字，請在辨識結果中標註 `[使用者推薦]`。
+2. **語源與字根解析 (Etymology)**：
+   - 請在回傳結構中附帶 etymology 欄位，說明新詞或關鍵詞的來源（傳統用法 / 字根組合 / 日語借詞 / 中文借詞 / 英語借詞 / 其他）。
 3. **強制引用與查驗**：
    - 在 reference 欄位中，必須明確寫出引用的參考句 ID 或標明「AI 備援組合生成」。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
 {{
-  "user_recognized_tao": "使用者輸入的達悟語或對照羅馬字（若有自創字請標註 [使用者推薦]）",
+  "user_recognized_tao": "使用者輸入的達悟語或對照羅馬字",
   "user_translation": "中文對照翻譯",
-  "ai_reply_tao": "達悟語回應句子（任何語料庫中找不到原字者必須標註 [AI自創]）",
+  "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
-  "reference": "必須明確列出引用的語料庫ID與出處，或說明備援對照。"
+  "etymology": "說明新詞或回應中關鍵詞的語源（例：傳統用法、日語借詞、英語借詞等）",
+  "is_ai_generated": true,
+  "reference": "必須明確列出引用的語料庫ID與出處"
 }}
 """
 
@@ -400,21 +444,16 @@ def process_ai_input(text_prompt=None):
             result = json.loads(response.text)
 
             if "user_recognized_tao" in result:
-                result["user_recognized_tao"] = lower_first_char(
-                    result["user_recognized_tao"]
-                )
+                result["user_recognized_tao"] = lower_first_char(result["user_recognized_tao"])
             if "ai_reply_tao" in result:
-                result["ai_reply_tao"] = lower_first_char(
-                    result["ai_reply_tao"]
-                )
+                result["ai_reply_tao"] = lower_first_char(result["ai_reply_tao"])
+            if "is_ai_generated" not in result:
+                result["is_ai_generated"] = False
 
             return result
         except ResourceExhausted:
             if attempt < max_retries - 1:
                 wait_time = 5 * (2 ** attempt)
-                st.warning(
-                    f"⏳ API 請求過於頻繁，系統正在等待 {wait_time} 秒後自動重試（第 {attempt + 1} 次）..."
-                )
                 time.sleep(wait_time)
             else:
                 st.error("❌ 請求超出 API 配額限制，請稍候再試。")
@@ -426,34 +465,17 @@ def process_ai_input(text_prompt=None):
 
 # --- 全域選項選單 ---
 REGION_OPTIONS = [
-    "Jiyayo 椰油",
-    "Jiraralay 朗島",
-    "Jiranmilek 東清",
-    "Jivalino 野銀",
-    "Jimowrod 紅頭",
-    "Jiratay 漁人",
-    "Ivatan 巴丹",
-    "Ji Taywan 台灣",
-    "ilaod 其他",
+    "Jiyayo 椰油", "Jiraralay 朗島", "Jiranmilek 東清", "Jivalino 野銀",
+    "Jimowrod 紅頭", "Jiratay 漁人", "Ivatan 巴丹", "Ji Taywan 台灣", "ilaod 其他",
 ]
-
 AGE_OPTIONS = [
-    "alikey 學齡前",
-    "kosiaw 國小",
-    "kocong aka kawcong 國高中",
-    "18-30",
-    "31-40",
-    "41-50",
-    "51-60",
-    "61-70",
-    "71-80",
-    "ikaroa a ngernan o kakawakawan 81歲及以上",
+    "alikey 學齡前", "kosiaw 國小", "kocong aka kawcong 國高中", "18-30",
+    "31-40", "41-50", "51-60", "61-70", "71-80", "ikaroa a ngernan o kakawakawan 81歲及以上",
 ]
-
 GENDER_OPTIONS = ["mehakay 男", "mavakes 女", "ji nipanci 不公開"]
 
 
-# --- 6. 側邊欄：登入與註冊 ---
+# --- 7. 側邊欄：登入與註冊 ---
 with st.sidebar:
     st.markdown(dual_text("vahay do kararay", "會員中心", is_title=True), unsafe_allow_html=True)
     st.caption("☁️ 雲端資料庫已連線")
@@ -486,24 +508,11 @@ with st.sidebar:
             new_e = st.text_input("信箱輸入框", label_visibility="collapsed")
             
             st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
-            new_r = st.multiselect(
-                "部落選擇",
-                REGION_OPTIONS,
-                default=["Jiyayo 椰油"],
-                label_visibility="collapsed"
-            )
+            new_r = st.multiselect("部落選擇", REGION_OPTIONS, default=["Jiyayo 椰油"], label_visibility="collapsed")
             st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
-            new_a = st.selectbox(
-                "年齡選擇",
-                AGE_OPTIONS,
-                label_visibility="collapsed"
-            )
+            new_a = st.selectbox("年齡選擇", AGE_OPTIONS, label_visibility="collapsed")
             st.markdown(dual_text("mikataretarek", "性別"), unsafe_allow_html=True)
-            new_g = st.selectbox(
-                "性別選擇",
-                GENDER_OPTIONS,
-                label_visibility="collapsed"
-            )
+            new_g = st.selectbox("性別選擇", GENDER_OPTIONS, label_visibility="collapsed")
             if st.button("mamareng 註冊"):
                 if not new_r:
                     st.warning("請至少選擇一個部落。")
@@ -518,7 +527,7 @@ with st.sidebar:
             st.session_state.user_info = None
             st.rerun()
 
-# --- 7. 主頁面區塊 ---
+# --- 8. 主頁面區塊 ---
 main_menu = st.radio(
     "",
     [
@@ -551,38 +560,19 @@ if main_menu == "miAI ko / 我要用AI":
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
-            cur_r = st.multiselect(
-                "ili",
-                REGION_OPTIONS,
-                default=default_regions,
-                label_visibility="collapsed"
-            )
+            cur_r = st.multiselect("ili", REGION_OPTIONS, default=default_regions, label_visibility="collapsed")
         with c2:
             st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
-            cur_a = st.selectbox(
-                "kakawakawan",
-                AGE_OPTIONS,
-                index=AGE_OPTIONS.index(user["age_group"]) if user["age_group"] in AGE_OPTIONS else 3,
-                label_visibility="collapsed"
-            )
+            cur_a = st.selectbox("kakawakawan", AGE_OPTIONS, index=AGE_OPTIONS.index(user["age_group"]) if user["age_group"] in AGE_OPTIONS else 3, label_visibility="collapsed")
         with c3:
             st.markdown(dual_text("mikataretarek", "性別"), unsafe_allow_html=True)
-            cur_g = st.selectbox(
-                "mikataretarek",
-                GENDER_OPTIONS,
-                index=GENDER_OPTIONS.index(user["gender"]) if user["gender"] in GENDER_OPTIONS else 0,
-                label_visibility="collapsed"
-            )
+            cur_g = st.selectbox("mikataretarek", GENDER_OPTIONS, index=GENDER_OPTIONS.index(user["gender"]) if user["gender"] in GENDER_OPTIONS else 0, label_visibility="collapsed")
         current_bg = {"region": cur_r, "age_group": cur_a, "gender": cur_g}
 
         st.divider()
 
         st.markdown(dual_text("mivatvatek", "請輸入文字"), unsafe_allow_html=True)
-        text_input = st.text_input(
-            "text_input_box",
-            placeholder="例如：Akokay / 今天天氣如何？",
-            label_visibility="collapsed"
-        )
+        text_input = st.text_input("text_input_box", placeholder="例如：Akokay / 今天天氣如何？", label_visibility="collapsed")
         if st.button("itoro 發送查詢（演算法優先）"):
             if text_input.strip():
                 with st.spinner("⏳ 演算法檢索與備援處理中..."):
@@ -597,10 +587,13 @@ if main_menu == "miAI ko / 我要用AI":
             q_orig = st.session_state.get("active_q", "")
             bg_info = st.session_state.get("active_bg", current_bg)
 
-            # 將複選部落整理為字串格式
             reg_val = bg_info["region"]
             reg_str = ", ".join(reg_val) if isinstance(reg_val, list) else reg_val
             user_profile_str = f"部落: {reg_str} | 年齡層: {bg_info['age_group']} | 性別: {bg_info['gender']}"
+
+            # 經過螢光筆與標記處理的回應
+            is_ai = ai_data.get("is_ai_generated", False)
+            formatted_reply_tao = format_sentence_with_highlights(ai_data.get("ai_reply_tao", ""), is_ai_generated=is_ai, user_accepted=False)
 
             st.markdown("---")
             st.markdown(
@@ -617,21 +610,20 @@ if main_menu == "miAI ko / 我要用AI":
             st.markdown(
                 f"""
                 <div style="padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                    <div style="font-size: 18px; font-weight: bold;">maniring o AI/演算法 am (回應結果)</div>
-                    <div style="font-size: 18px; font-weight: bold; margin-top: 5px;">{ai_data.get('ai_reply_tao', '')}</div>
-                    <div style="font-size: 14px; opacity: 0.8;">{ai_data.get('ai_reply_zh', '')}</div>
+                    <div style="font-size: 18px; font-weight: bold;">maniring o AI/演算法 am (回應結果 - 帶螢光筆標記)</div>
+                    <div style="font-size: 18px; font-weight: bold; margin-top: 5px;">{formatted_reply_tao}</div>
+                    <div style="font-size: 14px; opacity: 0.8; margin-top: 4px;"><b>語源/字根解析 (Etymology):</b> {ai_data.get('etymology', '傳統用法/未特別標註')}</div>
+                    <div style="font-size: 13px; color: #6B7280; margin-top: 2px;">💡 提示：黃色標記代表使用者推薦或用例不足10筆；紅色代表AI自創字。</div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-            # 「參考資料」一欄顯示使用者的部落、年齡與性別背景
             st.markdown(
                 f"""
                 <div style="padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
                     <div style="font-size: 18px; font-weight: bold;">o pakaaranan no ciring (參考資料 / 語料來源)</div>
                     <div style="font-size: 16px; font-weight: bold; margin-top: 5px;">{user_profile_str}</div>
-                    <div style="font-size: 14px; opacity: 0.8; margin-top: 3px;">系統參考紀錄: {ai_data.get('reference', '未提供參考資料')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -639,11 +631,10 @@ if main_menu == "miAI ko / 我要用AI":
 
             st.divider()
             st.markdown(dual_text("o kapakaapiya no ciring", "語料品質評估", is_title=True), unsafe_allow_html=True)
-            st.markdown(dual_text("ya apiya o niyawen kano mivaliw ya?", "這組辨識與翻譯是否正確？"), unsafe_allow_html=True)
             
             eval_choice = st.radio(
                 "eval_choice_radio",
-                ["apiya / 正確", "beken / 錯誤"],
+                ["apiya / 正確 (直接採納)", "beken / 錯誤 (我要修改)"],
                 horizontal=True,
                 label_visibility="collapsed"
             )
@@ -660,40 +651,22 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=False,
                         is_error=False,
                     ):
-                        st.success("🎉 已成功儲存！")
+                        st.success("🎉 已成功儲存！若含 AI 自創字因您直接採納，將自動降為黃色標記顯示。")
                         del st.session_state.ai_data
                         st.rerun()
 
             elif "beken" in eval_choice:
-                st.warning("⚠ 發現錯誤。您可以修正文字與參考資料來源：")
+                st.warning("⚠ 發現錯誤。您可以修正文字：")
 
                 st.markdown("**ablisan o pacici**<br><span style='font-size:14px; opacity:0.8;'>修正【問題】</span>", unsafe_allow_html=True)
-                e_q_tao = st.text_input(
-                    "修改句子 1 達悟語：",
-                    value=ai_data.get("user_recognized_tao", q_orig),
-                )
+                e_q_tao = st.text_input("修改句子 1 達悟語：", value=ai_data.get("user_recognized_tao", q_orig))
                 st.markdown("**ablisan o mivaliw no pacici**<br><span style='font-size:14px; opacity:0.8;'>修改問題翻譯</span>", unsafe_allow_html=True)
-                e_q_trans = st.text_input(
-                    "修改句子 1 翻譯：",
-                    value=ai_data.get("user_translation", ""),
-                )
+                e_q_trans = st.text_input("修改句子 1 翻譯：", value=ai_data.get("user_translation", ""))
 
                 st.markdown("**ablisan o tovis**<br><span style='font-size:14px; opacity:0.8;'>修正【回應】</span>", unsafe_allow_html=True)
-                e_r_tao = st.text_input(
-                    "修改句子 2 達悟語：",
-                    value=ai_data.get("ai_reply_tao", ""),
-                )
+                e_r_tao = st.text_input("修改句子 2 達悟語：", value=ai_data.get("ai_reply_tao", ""))
                 st.markdown("**ablisan o mivaliw no tovis**<br><span style='font-size:14px; opacity:0.8;'>修改回應翻譯</span>", unsafe_allow_html=True)
-                e_r_zh = st.text_input(
-                    "修改句子 2 翻譯：",
-                    value=ai_data.get("ai_reply_zh", ""),
-                )
-
-                st.markdown("**ablisan o vakong no ciring**<br><span style='font-size:14px; opacity:0.8;'>修改【參考資料 / 語料來源】</span>", unsafe_allow_html=True)
-                e_ref = st.text_input(
-                    "修改【參考資料 / 語料來源】：",
-                    value=ai_data.get("reference", ""),
-                )
+                e_r_zh = st.text_input("修改句子 2 翻譯：", value=ai_data.get("ai_reply_zh", ""))
 
                 if st.button("voka 💾 儲存修正版"):
                     if save_語料_to_supabase(
@@ -706,22 +679,17 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=True,
                         is_error=True,
                     ):
-                        st.success("🎉 已成功更新")
+                        st.success("🎉 已成功更新修正版")
                         del st.session_state.ai_data
                         st.rerun()
 
 elif main_menu == "manita so tao a miAI / 看別人用AI":
     st.markdown(
-        dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與語料檢視", is_title=True), 
+        dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與單字用法投票", is_title=True), 
         unsafe_allow_html=True
     )
     try:
-        res_feedback = (
-            supabase.from_("feedback")
-            .select("*")
-            .order("timestamp", desc=True)
-            .execute()
-        )
+        res_feedback = supabase.from_("feedback").select("*").order("timestamp", desc=True).execute()
         res_votes = supabase.from_("community_votes").select("*").execute()
 
         feedbacks = res_feedback.data if res_feedback.data else []
@@ -737,11 +705,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         if not feedbacks:
             st.info("目前尚無採集到的語料。")
         else:
-            current_user = (
-                st.session_state.user_info["username"]
-                if st.session_state.user_info
-                else None
-            )
+            current_user = st.session_state.user_info["username"] if st.session_state.user_info else None
 
             for fb in feedbacks:
                 fb_id = fb["id"]
@@ -751,13 +715,9 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 agree_count = sum(1 for v in fb_votes if v.get("vote_result") == "贊同")
                 disagree_count = sum(1 for v in fb_votes if v.get("vote_result") == "不贊同")
 
-                user_voted = any(
-                    v.get("voter_id") == current_user for v in fb_votes
-                )
+                user_voted = any(v.get("voter_id") == current_user for v in fb_votes)
 
-                with st.expander(
-                    f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"
-                ):
+                with st.expander(f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"):
                     col_info, col_action = st.columns([4, 1])
 
                     with col_info:
@@ -775,7 +735,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         st.markdown(
                             f"""
                             <div style="padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                                <div style="font-size: 16px; font-weight: bold;">tovis (答)</div>
+                                <div style="font-size: 16px; font-weight: bold;">tovis (答 - 單字用法驗證)</div>
                                 <div style="font-size: 18px; font-weight: bold; margin-top: 4px;">{fb.get('tao_text')}</div>
                                 <div style="font-size: 14px; opacity: 0.8;">{fb.get('zh_text')}</div>
                             </div>
@@ -794,39 +754,39 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
                         if fb_votes:
                             st.markdown("---")
-                            st.caption("📊 方言差與投票背景統計：")
+                            st.caption("📊 單字用法投票與替代詞統計：")
                             for v in fb_votes:
                                 r_voter = v.get("region", "未知部落")
                                 a_voter = v.get("age_group", "未知年齡")
                                 g_voter = v.get("gender", "未知性別")
                                 res_voter = v.get("vote_result", "未表態")
-                                sug_voter = v.get("hidden_suggestion", "")
-                                sug_text = f" (建議: {sug_voter})" if sug_voter else ""
-                                st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{sug_text}")
+                                alt_word = v.get("hidden_suggestion", "")
+                                alt_text = f" (提出替代詞: {alt_word})" if alt_word else ""
+                                st.text(f"• [{r_voter} / {a_voter} / {g_voter}] 投: {res_voter}{alt_text}")
 
                     with col_action:
                         st.markdown(dual_text("kapisirisiring", "總投票數"), unsafe_allow_html=True)
                         st.metric("總投票數", f"{vote_count} 票", label_visibility="collapsed")
-                        st.caption(f"👍 贊同: {agree_count} | 👎 不贊同: {disagree_count}")
+                        st.caption(f"👍 贊成: {agree_count} | 👎 反對: {disagree_count}")
 
                         if current_user:
                             if user_voted:
-                                st.markdown(dual_text("niapiya", "已贊同"), unsafe_allow_html=True)
+                                st.markdown(dual_text("niapiya", "已參與投票"), unsafe_allow_html=True)
                             else:
-                                st.markdown("##### 🗳️ 參與評估")
+                                st.markdown("##### 🗳️ 單字用法投票")
                                 vote_choice = st.radio(
-                                    "選擇投票：",
+                                    "是否贊成此單字用法：",
                                     ["贊同", "不贊同"],
                                     key=f"v_choice_{fb_id}",
                                     horizontal=True,
                                 )
-                                suggestion_input = st.text_area(
-                                    "選填建議說明：",
-                                    key=f"v_sug_{fb_id}",
-                                    placeholder="可輸入不同部落的慣用語法或修正意見...",
+                                alt_word_input = st.text_input(
+                                    "若不贊同，請提出另一推薦詞：",
+                                    key=f"v_alt_{fb_id}",
+                                    placeholder="輸入建議替代詞...",
                                 )
 
-                                if st.button("送出投票紀錄", key=f"btn_vote_{fb_id}"):
+                                if st.button("送出單字投票", key=f"btn_vote_{fb_id}"):
                                     try:
                                         voter_info = st.session_state.user_info
                                         voter_region = voter_info.get("region", "未知")
@@ -839,23 +799,18 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                                             "age_group": voter_info.get("age_group", "未知"),
                                             "gender": voter_info.get("gender", "未知"),
                                             "vote_result": vote_choice,
-                                            "hidden_suggestion": suggestion_input,
+                                            "hidden_suggestion": alt_word_input,
                                             "timestamp": datetime.datetime.now().isoformat(),
                                         }
                                         supabase.from_("community_votes").insert(vote_record).execute()
-                                        st.success("🎉 投票與背景紀錄已儲存！")
+                                        st.success("🎉 單字投票與替代詞已記錄！")
                                         st.rerun()
                                     except Exception as err:
                                         st.error(f"投票失敗：{err}")
 
-                            if (
-                                current_user == "admin"
-                                or fb.get("user_id") == current_user
-                            ):
+                            if current_user == "admin" or fb.get("user_id") == current_user:
                                 if st.button("opas 🗑️ 刪除", key=f"del_{fb_id}"):
-                                    ok, msg = delete_feedback_item(
-                                        fb_id, current_user
-                                    )
+                                    ok, msg = delete_feedback_item(fb_id, current_user)
                                     if ok:
                                         st.success(msg)
                                         st.rerun()
@@ -866,15 +821,16 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         st.error(f"讀取社群資料失敗：{e}")
 
 elif main_menu == "amian so AI ori / 關於本站":
-    st.subheader("🏝️ 關於 🏝️ [達悟文語料庫&AI訓練](https://gemini.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe)")
+    st.subheader(f"🏝️ 關於 🏝️ [達悟文語料庫&AI訓練](https://gemini.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe)")
     st.markdown(
         """
         ### 專案願景
         本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
+
         ### 系統特色
-        1. **正詞法與音系約束**：採用達悟語專屬羅馬字拼音規則，自動關閉瀏覽器拼字檢查以提供最佳輸入體驗。
-        2. **嚴謹引用機制**：AI 生成回應時，強制比對與引用合規參考語料庫，確保語法與文化情境精確。
-        3. **社群共同驗證與方言差分析**：引入眾包（Crowdsourcing）評估與投票機制，結合使用者部落、年齡與性別背景，記錄贊同與不贊同意見與改善建議，有助於後續的方言差比對與統計。
+        1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者推薦字顯示**黃色螢光筆**；AI 自創字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
+        2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
+        3. **單字用法社群投票**：社群成員可針對特定詞彙用法進行贊成/反對投票，並能提出不同部落的慣用替代詞。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
