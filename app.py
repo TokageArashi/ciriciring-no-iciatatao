@@ -850,16 +850,19 @@ if main_menu == "miAI ko / 我要用AI":
             is_ai = ai_data.get("is_ai_generated", False)
 
             st.markdown("---")
-            st.markdown(
-                f"""
-                <div style="padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                    <div style="font-size: 18px; font-weight: bold;">maniring o tao am (輸入與辨識)</div>
-                    <div style="font-size: 18px; font-weight: bold; margin-top: 5px;">{ai_data.get('user_recognized_tao', q_orig)}</div>
-                    <div style="font-size: 14px; opacity: 0.8;">{ai_data.get('user_translation', '')}</div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            user_sentence = ai_data.get("user_recognized_tao", q_orig)
+            with st.container(border=True):
+                st.markdown("<div style='font-size: 18px; font-weight: bold;'>maniring o tao am (輸入與辨識)</div>", unsafe_allow_html=True)
+                render_interactive_sentence(
+                    user_sentence,
+                    is_ai_generated=False,
+                    user_accepted=True,
+                    etymology_map=ai_data.get("etymology", {}),
+                    key_prefix="main_user",
+                    enable_word_voting=False,  # 自己輸入的句子只看說明與票數，投票在回應句進行
+                    user_input_text=user_sentence,
+                )
+                st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{ai_data.get('user_translation', '')}</div>", unsafe_allow_html=True)
 
             st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊有螢光標籤的單字查看說明與投票)")
             render_interactive_sentence(
@@ -958,16 +961,17 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 fb_id = fb["id"]
 
                 with st.expander(f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})"):
-                    st.markdown(
-                        f"""
-                        <div style="padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(128, 128, 128, 0.3);">
-                            <div style="font-size: 16px; font-weight: bold;">pacici (問)</div>
-                            <div style="font-size: 18px; font-weight: bold; margin-top: 4px;">{fb.get('q_original')}</div>
-                            <div style="font-size: 14px; opacity: 0.8;">{fb.get('q_trans')}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
+                    with st.container(border=True):
+                        st.markdown("<div style='font-size: 16px; font-weight: bold;'>pacici (問)</div>", unsafe_allow_html=True)
+                        render_interactive_sentence(
+                            fb.get('q_original', ''),
+                            is_ai_generated=False,
+                            user_accepted=True,
+                            key_prefix=f"fbq_{fb_id}",
+                            enable_word_voting=False,  # 問句只看說明與票數；投票在「答」進行
+                            user_input_text=fb.get('q_original', ''),
+                        )
+                        st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{fb.get('q_trans') or ''}</div>", unsafe_allow_html=True)
 
                     st.markdown("##### tovis (答 - 點擊有螢光標籤的單字即可查看說明與投票)")
                     
