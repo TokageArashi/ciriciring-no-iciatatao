@@ -135,7 +135,7 @@ def login_user(username, password):
         return []
 
 
-# --- 3. Supabase 讀寫函式 (無語音檔需求) ---
+# --- 3. Supabase 讀寫函式 ---
 def save_語料_to_supabase(
     user_info,
     bg_info,
@@ -597,6 +597,11 @@ if main_menu == "miAI ko / 我要用AI":
             q_orig = st.session_state.get("active_q", "")
             bg_info = st.session_state.get("active_bg", current_bg)
 
+            # 將複選部落整理為字串格式
+            reg_val = bg_info["region"]
+            reg_str = ", ".join(reg_val) if isinstance(reg_val, list) else reg_val
+            user_profile_str = f"部落: {reg_str} | 年齡層: {bg_info['age_group']} | 性別: {bg_info['gender']}"
+
             st.markdown("---")
             st.markdown(
                 f"""
@@ -620,11 +625,13 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True
             )
 
+            # 「參考資料」一欄顯示使用者的部落、年齡與性別背景
             st.markdown(
                 f"""
                 <div style="padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
                     <div style="font-size: 18px; font-weight: bold;">o pakaaranan no ciring (參考資料 / 語料來源)</div>
-                    <div style="font-size: 16px; font-weight: bold; margin-top: 5px;">{ai_data.get('reference', '未提供參考資料')}</div>
+                    <div style="font-size: 16px; font-weight: bold; margin-top: 5px;">{user_profile_str}</div>
+                    <div style="font-size: 14px; opacity: 0.8; margin-top: 3px;">系統參考紀錄: {ai_data.get('reference', '未提供參考資料')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -660,7 +667,6 @@ if main_menu == "miAI ko / 我要用AI":
             elif "beken" in eval_choice:
                 st.warning("⚠ 發現錯誤。您可以修正文字與參考資料來源：")
 
-                # 正確的標題顯示（無 HTML 外漏）
                 st.markdown("**ablisan o pacici**<br><span style='font-size:14px; opacity:0.8;'>修正【問題】</span>", unsafe_allow_html=True)
                 e_q_tao = st.text_input(
                     "修改句子 1 達悟語：",
@@ -860,9 +866,11 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         st.error(f"讀取社群資料失敗：{e}")
 
 elif main_menu == "amian so AI ori / 關於本站":
-    st.subheader("🏝️ 關於 🏝️ [ciriciring no iciatatao](https://gemini.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe)")
+    st.subheader("🏝️ 關於 🏝️ [達悟文語料庫&AI訓練](https://gemini.google.com/notebook/c085e3d3-7366-4ea0-9f9b-26801d8c49fe)")
     st.markdown(
         """
+        ### 專案願景
+        本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
         ### 系統特色
         1. **正詞法與音系約束**：採用達悟語專屬羅馬字拼音規則，自動關閉瀏覽器拼字檢查以提供最佳輸入體驗。
         2. **嚴謹引用機制**：AI 生成回應時，強制比對與引用合規參考語料庫，確保語法與文化情境精確。
