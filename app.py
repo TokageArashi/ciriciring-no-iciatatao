@@ -213,6 +213,7 @@ def save_語料_to_supabase(
         }
         res_ins = supabase.from_("feedback").insert(data).execute()
         build_word_index.clear()
+        load_user_typed_words.clear()
 
         # 使用者若在「尚未儲存」的回應句上投過票，句子存檔（且未修改）後，
         # 把那些票改掛到新例句的 id，這樣同一句不會在例句頁被重複投票。
@@ -223,7 +224,7 @@ def save_語料_to_supabase(
                     supabase.from_("community_votes").update({"feedback_id": new_id}).eq(
                         "feedback_id", 0
                     ).like("hidden_suggestion", f"%sent:{pending_sentence_id}%").execute()
-                    load_votes_index.clear()
+                    load_vote_data.clear()
                     load_user_votes.clear()
             except Exception:
                 pass
@@ -444,30 +445,84 @@ def build_word_index():
     return index
 
 
-@st.cache_data(ttl=30)
-def load_votes_index():
-    """單字 -> {'agree', 'disagree', 'suggestions'}。全站投票只查一次 Supabase。"""
-    index = {}
-    try:
-        res = supabase.from_("community_votes").select("vote_result, hidden_suggestion").execute()
-    except Exception:
-        return index
+def _parse_vote(v):
+    """
+    把一筆 community_votes 解析成 (被投票的單字, 投給的拼法)。
+    新格式: word_key:apia | pick:apiya
+    舊格式: word_key:apia | 替代詞: apiya  /  word_key:apia | 贊同  /  word_key:apia | 不贊同
+    """
+    sug = str(v.get("hidden_suggestion", "") or "").lower()
+    m = re.search(r"word_key:(.+?)\s*(?:\||$)", sug) or re.search(r"\[(.+?)\]", sug)
+    if not m:
+        return None
+    word = m.group(1).strip()
 
+    pk = re.search(r"pick:(.+?)\s*(?:\||$)", sug)
+    if pk:
+        pick = pk.group(1).strip()
+    elif "替代詞:" in sug:
+        pick = normalize_word(sug.split("替代詞:")[-1].strip())
+        if re.search(r"\s", pick):
+            pick = None
+    elif v.get("vote_result") == "贊同":
+        pick = word
+    else:
+        pick = None  # 舊資料：不贊同但沒有提出替代拼法
+    return word, (pick or None)
+
+
+@st.cache_data(ttl=30)
+def load_vote_data():
+    """
+    tally      {拼法: 被選次數}
+    group_of   {單字: 群組代表字}      只有「被提出過替代拼法」的單字才有群組
+    members    {群組代表字: [同組拼法]}
+    user_picks {帳號: {群組代表字: {拼法: 次數}}}
+    """
+    empty = {"tally": {}, "group_of": {}, "members": {}, "user_picks": {}}
+    try:
+        res = supabase.from_("community_votes").select("voter_id, vote_result, hidden_suggestion").execute()
+    except Exception:
+        return empty
+
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    tally, rows = {}, []
     for v in res.data or []:
-        sug = str(v.get("hidden_suggestion", "") or "").lower()
-        m = re.search(r"word_key:(.+?)\s*(?:\||$)", sug) or re.search(r"\[(.+?)\]", sug)
-        if not m:
+        parsed = _parse_vote(v)
+        if not parsed:
             continue
-        entry = index.setdefault(m.group(1).strip(), {"agree": 0, "disagree": 0, "suggestions": []})
-        if v.get("vote_result") == "贊同":
-            entry["agree"] += 1
-        elif v.get("vote_result") == "不贊同":
-            entry["disagree"] += 1
-        if "替代詞:" in sug:
-            alt = sug.split("替代詞:")[-1].strip()
-            if alt:
-                entry["suggestions"].append(alt)
-    return index
+        word, pick = parsed
+        find(word)
+        if pick:
+            tally[pick] = tally.get(pick, 0) + 1
+            if pick != word:  # 有人把 word 的替代拼法提為 pick → 兩者視為同一個詞的不同拼法
+                ra, rb = find(word), find(pick)
+                if ra != rb:
+                    parent[rb] = ra
+        rows.append((v.get("voter_id"), pick))
+
+    roots = {w: find(w) for w in list(parent)}
+    members = {}
+    for w, r in roots.items():
+        members.setdefault(r, []).append(w)
+    members = {r: sorted(ws) for r, ws in members.items() if len(ws) > 1}
+    group_of = {w: r for w, r in roots.items() if r in members}
+
+    user_picks = {}
+    for voter, pick in rows:
+        if voter and pick and pick in group_of:
+            d = user_picks.setdefault(voter, {}).setdefault(group_of[pick], {})
+            d[pick] = d.get(pick, 0) + 1
+
+    return {"tally": tally, "group_of": group_of, "members": members, "user_picks": user_picks}
 
 
 def sentence_key(fb_id, sentence_id):
@@ -513,6 +568,84 @@ def load_user_votes(voter_id):
         return set()
 
 
+@st.cache_data(ttl=60)
+def load_user_typed_words(username):
+    """此帳號自己打過的字：已儲存的輸入句，以及自己修改過的回應句。AI 原樣回應的句子不算。"""
+    words = []
+    try:
+        res = (
+            supabase.from_("feedback")
+            .select("q_original, tao_text, is_edited")
+            .eq("user_id", username)
+            .execute()
+        )
+    except Exception:
+        return words
+    for r in res.data or []:
+        texts = [r.get("q_original")]
+        if r.get("is_edited"):
+            texts.append(r.get("tao_text"))
+        for t in texts:
+            words += [normalize_word(tok) for tok in (t or "").split()]
+    return [w for w in words if w]
+
+
+def get_spelling_prefs(username, current_text=""):
+    """
+    {單字: 這個帳號慣用的拼法}（只列出該被換掉的字）。
+    只看這個帳號自己的打字（含這次輸入）與自己的投票選擇，不受其他使用者影響；
+    各拼法分數相同時不調整。
+    """
+    if not username:
+        return {}
+    vd = load_vote_data()
+    group_of = vd["group_of"]
+    if not group_of:
+        return {}
+
+    score = {}
+
+    def bump(root, variant, n=1):
+        d = score.setdefault(root, {})
+        d[variant] = d.get(variant, 0) + n
+
+    typed = list(load_user_typed_words(username)) + [normalize_word(t) for t in (current_text or "").split()]
+    for w in typed:
+        if w in group_of:
+            bump(group_of[w], w)
+    for root, picks in vd["user_picks"].get(username, {}).items():
+        for variant, n in picks.items():
+            bump(root, variant, n)
+
+    prefs = {}
+    for root, d in score.items():
+        ranked = sorted(d.items(), key=lambda kv: -kv[1])
+        if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            continue
+        best = ranked[0][0]
+        for m in vd["members"].get(root, []):
+            if m != best:
+                prefs[m] = best
+    return prefs
+
+
+def apply_spelling_prefs(text, prefs):
+    """把句子裡的單字換成慣用拼法；回傳 (新句子, {原字: 新字})。"""
+    if not text or not prefs:
+        return text, {}
+    out, swaps = [], {}
+    for tok in text.split():
+        lead, core, trail = split_token(tok)
+        new = prefs.get(core.lower()) if core else None
+        if new:
+            if core[:1].isupper():
+                new = new[:1].upper() + new[1:]
+            swaps[core] = new
+            tok = f"{lead}{new}{trail}"
+        out.append(tok)
+    return " ".join(out), swaps
+
+
 def classify_word(count, in_user_input, is_ai_generated, user_accepted):
     """回傳 None（一般單字）、'yellow'、'red'。"""
     if count > HIGHLIGHT_THRESHOLD:
@@ -534,7 +667,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
         etymology_map = {}
 
     word_index = build_word_index()
-    votes_index = load_votes_index()
+    vote_data = load_vote_data()
     user_words = {normalize_word(t) for t in (user_input_text or "").split()} - {""}
 
     skey = sentence_key(fb_id, sentence_id)
@@ -560,8 +693,15 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                     example_zh = info.get("zh")
                     zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
                     category_title = "🔴 AI 自創字" if level == "red" else "🟡 使用者輸入 / 低用例詞彙"
-                    v = votes_index.get(clean_w, {"agree": 0, "disagree": 0, "suggestions": []})
                     tag = "hlR" if level == "red" else "hlY"
+
+                    # 同一個詞的不同拼法（有人提出過替代拼法才會成組）與各自票數
+                    group_root = vote_data["group_of"].get(clean_w)
+                    others = [m for m in vote_data["members"].get(group_root, []) if m != clean_w]
+                    usage = {m: word_index.get(m, {}).get("count", 0) for m in [clean_w] + others}
+                    votes_n = {m: vote_data["tally"].get(m, 0) for m in usage}
+                    totals = {m: usage[m] + votes_n[m] for m in usage}
+                    variants = [clean_w] + sorted(others, key=lambda m: -totals[m])
 
                     with st.popover(w, key=f"{key_prefix}_{tag}_{idx}"):
                         st.markdown(f"### 🔠 單字詳情: **{w}**")
@@ -572,34 +712,43 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         st.markdown(f"- **本站總用例數**: `{occ_count}` 次")
 
                         st.divider()
-                        st.markdown(f"#### 📊 全站投票統計 (`{clean_w}`)")
-                        total_agree = occ_count + v["agree"]  # 站上用例數 + 另外投票贊同的人數
-                        st.markdown(f"👍 **贊成票**: `{total_agree}` 票（用例 {occ_count} ＋ 投票 {v['agree']}） | 👎 **反對票**: `{v['disagree']}` 票")
-                        if v["suggestions"]:
-                            st.markdown(f"- **社群推薦替代詞**: {', '.join(set(v['suggestions']))}")
+                        st.markdown("#### 📊 拼法與票數（票數 ＝ 本站用例 ＋ 投票人數）")
+                        for m in variants:
+                            mark = "（本句）" if m == clean_w else ""
+                            st.markdown(f"- **{m}**{mark}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
 
                         if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
                             st.info(f"✅ 您已對本句的「{w}」投過票了")
                         elif enable_word_voting and current_user:
-                            st.markdown(f"#### 🗳️ 為單字 [{w}] 投票")
+                            st.markdown("#### 🗳️ 這裡該用哪個拼法？")
                             w_choice = st.radio(
-                                f"您是否贊成「{w}」的用法？",
-                                ["贊同", "不贊同"],
+                                "選擇拼法",
+                                variants,
                                 key=f"w_choice_{key_prefix}_{idx}",
+                                format_func=lambda m, t=totals: f"{m}（{t[m]}）",
                                 horizontal=True,
+                                label_visibility="collapsed",
                             )
                             w_alt_input = st.text_input(
-                                f"若不贊同，請提出「{w}」的替代詞：",
+                                "或提出其他拼法（單一單字；留空則採用上面的選擇）：",
                                 key=f"w_alt_{key_prefix}_{idx}",
-                                placeholder="輸入建議替代詞...",
+                                placeholder="例如：apiya",
                             )
 
-                            if st.button(f"送出 [{w}] 投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
+                            if st.button("送出投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
                                 try:
                                     # 送出前重新查一次，確保「同帳號、同例句、同單字」只有一票
                                     load_user_votes.clear()
                                     if skey and (skey, clean_w) in _fetch_user_votes(current_user):
                                         raise ValueError(f"您已對本句的「{w}」投過票，無法重複投票。")
+
+                                    alt_raw = w_alt_input.strip()
+                                    if alt_raw and re.search(r"\s", alt_raw):
+                                        raise ValueError("提出的拼法請只輸入單一單字。")
+                                    alt = normalize_word(alt_raw)
+                                    if alt_raw and not alt:
+                                        raise ValueError("提出的拼法無效。")
+                                    pick = alt or w_choice  # 提出新拼法 = 同時投給該拼法
 
                                     voter_info = st.session_state.user_info
                                     voter_region = voter_info.get("region", "未知")
@@ -607,7 +756,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
                                     # 尚未儲存的回應句用 sent:<暫時id> 標記是哪一句
                                     sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
-                                    suggestion_content = f"word_key:{clean_w}{sent_part} | 替代詞: {w_alt_input}" if w_alt_input else f"word_key:{clean_w}{sent_part} | {w_choice}"
+                                    suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}"
 
                                     supabase.from_("community_votes").insert({
                                         "feedback_id": fb_id if fb_id else 0,
@@ -615,13 +764,13 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                                         "region": voter_region_str,
                                         "age_group": voter_info.get("age_group", "未知"),
                                         "gender": voter_info.get("gender", "未知"),
-                                        "vote_result": w_choice,
+                                        "vote_result": "贊同" if pick == clean_w else "不贊同",
                                         "hidden_suggestion": suggestion_content,
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }).execute()
-                                    load_votes_index.clear()
+                                    load_vote_data.clear()
                                     load_user_votes.clear()
-                                    st.success(f"🎉 單字 [{w}] 全站投票已成功記錄！")
+                                    st.success(f"🎉 已投給「{pick}」！")
                                     st.rerun()
                                 except Exception as vote_err:
                                     st.error(f"投票失敗：{vote_err}")
@@ -836,6 +985,17 @@ if main_menu == "miAI ko / 我要用AI":
                     if ai_data:
                         st.session_state.active_q = text_input
                         ai_data["sentence_id"] = uuid.uuid4().hex  # 這一句回應的暫時識別
+
+                        # 依「這位使用者自己」的打字與投票習慣，把回應中的字換成他慣用的拼法
+                        prefs = get_spelling_prefs(st.session_state.user_info["username"], text_input)
+                        ai_data["ai_reply_tao"], swaps = apply_spelling_prefs(ai_data.get("ai_reply_tao", ""), prefs)
+                        if swaps:
+                            ety = ai_data.get("etymology") if isinstance(ai_data.get("etymology"), dict) else {}
+                            for old, new in swaps.items():
+                                if old in ety and new not in ety:
+                                    ety[new] = ety[old]
+                            ai_data["etymology"] = ety
+                            ai_data["spelling_swaps"] = swaps
                         st.session_state.ai_data = ai_data
                         st.session_state.active_bg = current_bg
 
@@ -877,6 +1037,8 @@ if main_menu == "miAI ko / 我要用AI":
                 sentence_id=ai_data.get("sentence_id")
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
+            if ai_data.get("spelling_swaps"):
+                st.caption("已依您的慣用拼法調整：" + "、".join(f"{o} → {n}" for o, n in ai_data["spelling_swaps"].items()))
 
             st.markdown(
                 f"""
@@ -1008,7 +1170,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者推薦字顯示**黃色螢光筆**；AI 自創字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
-        3. **單字用法社群投票**：社群成員可針對特定詞彙用法進行贊成/反對投票，並能提出不同部落的慣用替代詞。
+        3. **單字用法社群投票**：社群成員可在同一個詞的不同拼法之間投票，也能提出新的拼法；系統會依每位使用者自己的打字與投票習慣調整回應用字，彼此不互相干擾。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
