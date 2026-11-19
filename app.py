@@ -275,13 +275,14 @@ def _first_col(row, names):
 
 def diagnose_corpus_table():
     """直接查 corpus 資料表，回報錯誤、可讀到的筆數與實際欄位名稱。"""
-    info = {"error": None, "count": None, "columns": []}
+    info = {"error": None, "count": None, "columns": [], "sample": []}
     try:
-        res = supabase.from_("corpus").select("*", count="exact").limit(1).execute()
+        res = supabase.from_("corpus").select("*", count="exact").limit(3).execute()
         rows = res.data or []
         info["count"] = res.count if getattr(res, "count", None) is not None else len(rows)
         if rows:
             info["columns"] = list(rows[0].keys())
+            info["sample"] = [{k: (str(v)[:60] if v is not None else None) for k, v in r.items()} for r in rows]
     except Exception as e:
         info["error"] = str(e)
     return info
@@ -313,7 +314,7 @@ def fetch_all_rows(table, columns="*", order=None, eq=None, page=1000):
 
 # --- 4. 語料庫讀取與檢索 ---
 @st.cache_data(ttl=300)
-def load_all_raw_corpus():
+def _load_all_raw_corpus_cached():
     corpus_items = []
     try:
         for r in fetch_all_rows("corpus", order=[("id", False)]):
@@ -359,6 +360,17 @@ def load_all_raw_corpus():
         st.warning(f"⚠️ 讀取社群驗證語料提示：{e}")
 
     return corpus_items
+
+
+def load_all_raw_corpus():
+    """有快取的語料載入；但空結果（讀取失敗、權限尚未修好等）不保留，下次立刻重讀。"""
+    items = _load_all_raw_corpus_cached()
+    if not items:
+        _load_all_raw_corpus_cached.clear()
+    return items
+
+
+load_all_raw_corpus.clear = _load_all_raw_corpus_cached.clear
 
 
 def search_relevant_corpus(user_input, top_k=3):
@@ -462,7 +474,7 @@ def split_token(token):
 
 
 @st.cache_data(ttl=300)
-def build_word_index():
+def _build_word_index_cached():
     """
     單字 -> {'count': 本站總出現次數, 'corpus': 官方語料次數, 'community': 社群例句次數, 'zh': 一則例句翻譯}。
     社群例句 = feedback 表中所有已儲存的例句（使用者輸入 q_original 與回應 tao_text）。
@@ -492,6 +504,16 @@ def build_word_index():
         pass
 
     return index
+
+
+def build_word_index():
+    index = _build_word_index_cached()
+    if not any(e.get("corpus") for e in index.values()):
+        _build_word_index_cached.clear()
+    return index
+
+
+build_word_index.clear = _build_word_index_cached.clear
 
 
 # --- 5.5 單字描述校正與異體字判定 ---
@@ -1374,13 +1396,18 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         language="sql",
                     )
                 else:
-                    st.error(f"corpus 有 {_d['count']} 筆，但沒有任何一筆讀得到 {CORPUS_TAO_COLS} 其中一個欄位的內容。")
-                    st.write("資料表實際的欄位：", _d["columns"])
+                    load_all_raw_corpus.clear()
+                    build_word_index.clear()
+                    st.warning(
+                        f"資料表現在讀得到 {_d['count']} 筆語料，但程式裡還留著先前讀到空結果的快取。"
+                        "已自動清除，請重新整理頁面（或操作任一元件）再看一次。"
+                    )
+                    st.write("資料表前幾列：", _d["sample"])
             else:
                 _empty = sum(1 for it in _official if not it["tao"].strip())
                 if _empty == len(_official):
-                    st.error("讀到了語料列，但達悟語欄位全是空的：欄位名稱可能不同，請對照下面的實際欄位。")
-                    st.write("資料表實際的欄位：", diagnose_corpus_table()["columns"])
+                    st.error("讀到了語料列，但達悟語欄位（tao_text）全是空的。請對照下面實際的資料內容。")
+                    st.write("資料表前幾列：", diagnose_corpus_table()["sample"])
                 elif _empty:
                     st.warning(f"有 {_empty} 筆語料的達悟語欄位是空的。")
                 _top = sorted(_widx.items(), key=lambda kv: -kv[1]["count"])[:10]
