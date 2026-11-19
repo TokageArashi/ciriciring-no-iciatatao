@@ -1,4 +1,5 @@
 import datetime
+import difflib
 import hashlib
 import html
 import json
@@ -179,6 +180,65 @@ def login_user(username, password):
 
 
 # --- 3. Supabase 讀寫函式 ---
+# --- 修改紀錄：保存「AI 原句 → 使用者修正句」 ---
+# 需要在 Supabase 建立資料表（只新增、不修改）：
+#   create table public.sentence_edits (
+#     id bigint generated always as identity primary key,
+#     feedback_id bigint,
+#     user_id text,
+#     source text,                       -- 'ai'（AI 生成）或 'algorithm'（語料比對）
+#     original_q_tao text, original_q_zh text,
+#     original_a_tao text, original_a_zh text,
+#     raw_a_tao text,                    -- 套用個人慣用拼法之前、模型的原始輸出
+#     edited_q_tao text, edited_q_zh text,
+#     edited_a_tao text, edited_a_zh text,
+#     diff_json jsonb,                   -- 逐詞（單詞替換時含逐字母）的差異
+#     created_at timestamptz default now()
+#   );
+#   alter table public.sentence_edits enable row level security;
+#   create policy "sentence_edits select" on public.sentence_edits for select using (true);
+#   create policy "sentence_edits insert" on public.sentence_edits for insert with check (true);
+#   notify pgrst, 'reload schema';
+def word_diff(old, new):
+    """逐詞比對兩個句子；單詞對單詞的替換另外記錄逐字母差異（之後可用來分析詞綴與拼法）。"""
+    a, b = (old or "").split(), (new or "").split()
+    sm = difflib.SequenceMatcher(None, [x.lower() for x in a], [x.lower() for x in b], autojunk=False)
+    ops = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        op = {"op": tag, "pos": i1, "from": " ".join(a[i1:i2]), "to": " ".join(b[j1:j2])}
+        if tag == "replace" and i2 - i1 == 1 and j2 - j1 == 1:
+            cs = difflib.SequenceMatcher(None, a[i1].lower(), b[j1].lower(), autojunk=False)
+            op["chars"] = [
+                [t, a[i1].lower()[x1:x2], b[j1].lower()[y1:y2]]
+                for t, x1, x2, y1, y2 in cs.get_opcodes()
+                if t != "equal"
+            ]
+        ops.append(op)
+    return ops
+
+
+def build_edit_record(ai_data, q_fallback, e_q_tao, e_q_zh, e_a_tao, e_a_zh):
+    """組出要寫入 sentence_edits 的內容；四個欄位都沒有被改動時回傳 None。"""
+    o_q_tao = ai_data.get("user_recognized_tao", q_fallback) or ""
+    o_q_zh = ai_data.get("user_translation") or ""
+    o_a_tao = ai_data.get("ai_reply_tao") or ""
+    o_a_zh = ai_data.get("ai_reply_zh") or ""
+    pairs = [(o_q_tao, e_q_tao), (o_q_zh, e_q_zh), (o_a_tao, e_a_tao), (o_a_zh, e_a_zh)]
+    if all((o or "").strip() == (e or "").strip() for o, e in pairs):
+        return None
+    return {
+        "source": "ai" if ai_data.get("is_ai_generated") else "algorithm",
+        "original_q_tao": o_q_tao, "original_q_zh": o_q_zh,
+        "original_a_tao": o_a_tao, "original_a_zh": o_a_zh,
+        "raw_a_tao": ai_data.get("ai_reply_tao_raw") or o_a_tao,
+        "edited_q_tao": e_q_tao, "edited_q_zh": e_q_zh,
+        "edited_a_tao": e_a_tao, "edited_a_zh": e_a_zh,
+        "diff_json": {"q": word_diff(o_q_tao, e_q_tao), "a": word_diff(o_a_tao, e_a_tao)},
+    }
+
+
 def save_語料_to_supabase(
     user_info,
     bg_info,
@@ -189,6 +249,7 @@ def save_語料_to_supabase(
     is_edited=False,
     is_error=False,
     pending_sentence_id=None,
+    edit_record=None,
 ):
     try:
         region_val = bg_info["region"]
@@ -215,6 +276,15 @@ def save_語料_to_supabase(
         res_ins = supabase.from_("feedback").insert(data).execute()
         build_word_index.clear()
         load_user_typed_words.clear()
+
+        # 使用者修改過 AI 的句子：把「修改前的原句」與逐詞差異另存一筆（失敗不影響句子本身的儲存）
+        if edit_record and is_edited and res_ins.data:
+            try:
+                supabase.from_("sentence_edits").insert(
+                    {**edit_record, "feedback_id": res_ins.data[0].get("id"), "user_id": user_info["username"]}
+                ).execute()
+            except Exception as edit_err:
+                st.toast(f"修改前的原句未能保存（請建立 sentence_edits 資料表）：{edit_err}", icon="⚠️")
 
         # 使用者若在「尚未儲存」的回應句上投過票，句子存檔（且未修改）後，
         # 把那些票改掛到新例句的 id，這樣同一句不會在例句頁被重複投票。
@@ -643,6 +713,93 @@ def build_notes_context(*texts, limit=30):
     return "\n".join(lines[:limit])
 
 
+# --- 拼寫與寫法檢查（由官方語料自動推得，不寫死任何拼寫規則） ---
+SPELL_MIN_LEN = 4              # 太短的字不做相似字建議（誤報太多）
+SPELL_MIN_CANDIDATE_COUNT = 3  # 建議的字在官方語料中至少要出現這麼多次
+
+
+def _deletions(w, max_d):
+    out, frontier = {w}, {w}
+    for _ in range(max_d):
+        nxt = {x[:i] + x[i + 1:] for x in frontier for i in range(len(x))}
+        out |= nxt
+        frontier = nxt
+    return out
+
+
+@st.cache_resource(ttl=300)
+def _spell_resources():
+    """官方語料的詞表、刪除一到兩個字母的索引（快速找相近字），以及各字母出現在幾個不同單字中。"""
+    idx = build_word_index()
+    deletes, chars, n_types = {}, {}, 0
+    for w, e in idx.items():
+        c = e.get("corpus", 0)
+        if c <= 0:
+            continue
+        n_types += 1
+        if len(w) >= SPELL_MIN_LEN and c >= SPELL_MIN_CANDIDATE_COUNT:
+            for d in _deletions(w, 2):
+                deletes.setdefault(d, set()).add(w)
+        for ch in set(w):
+            if ch.isalpha() or ch == "'":
+                chars[ch] = chars.get(ch, 0) + 1
+    return {"idx": idx, "deletes": deletes, "chars": chars, "n_types": n_types}
+
+
+@st.cache_data(ttl=300)
+def spell_check_word(word):
+    """
+    回傳 {'suggestions': [(相近的已知字, 差幾個字母, 官方語料次數)], 'odd_chars': [罕見字母]}。
+    相近字須在官方語料中的次數 >= max(3, 3 × 這個字本身的總用例)，避免把正常的罕用字誤判成拼錯。
+    """
+    out = {"suggestions": [], "odd_chars": []}
+    res = _spell_resources()
+    if not res["chars"] or not word:
+        return out
+
+    rare_cut = 2 if res["n_types"] >= 500 else 0
+    out["odd_chars"] = sorted(
+        {ch for ch in word if (ch.isalpha() or ch == "'") and res["chars"].get(ch, 0) <= rare_cut}
+    )
+
+    if len(word) >= SPELL_MIN_LEN:
+        k = min(2, max(1, len(word) // 4))
+        cands = set()
+        for d in _deletions(word, k):
+            cands |= res["deletes"].get(d, set())
+        need = max(SPELL_MIN_CANDIDATE_COUNT, 3 * res["idx"].get(word, {}).get("count", 0))
+        scored = []
+        for c in cands:
+            if c == word:
+                continue
+            dist = _edit_distance(word, c)
+            n = res["idx"][c]["corpus"]
+            if dist <= k and n >= need:
+                scored.append((dist, -n, c))
+        scored.sort()
+        out["suggestions"] = [(c, d, -n) for d, n, c in scored[:3]]
+    return out
+
+
+def spellcheck_notes(sentence, limit=5):
+    """整句的拼寫提醒：只檢查會被標螢光的字（用例 10 次以內）。"""
+    idx = _spell_resources()["idx"]
+    notes, seen = [], set()
+    for tok in (sentence or "").split():
+        w = normalize_word(tok)
+        if not w or w in seen or idx.get(w, {}).get("count", 0) > HIGHLIGHT_THRESHOLD:
+            continue
+        seen.add(w)
+        sc = spell_check_word(w)
+        if sc["suggestions"]:
+            notes.append(f"「{w}」→ 你是不是想寫 {'、'.join(s[0] for s in sc['suggestions'])}")
+        elif sc["odd_chars"]:
+            notes.append(f"「{w}」含有官方語料中罕見的字母 {'、'.join(sc['odd_chars'])}")
+        if len(notes) >= limit:
+            break
+    return notes
+
+
 def _parse_vote(v):
     """
     把一筆 community_votes 解析成 (被投票的單字, 投給的拼法, 異體關係)。
@@ -911,6 +1068,16 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         if note:
                             st.caption(f"✏️ 已由 {note.get('editor') or '使用者'} 校正（{str(note.get('created_at') or '')[:10]}）")
                         st.markdown(f"- **分類**: {category_title}")
+                        sc = spell_check_word(clean_w)
+                        if sc["suggestions"] or sc["odd_chars"]:
+                            st.markdown("🔎 **拼寫與寫法檢查**")
+                            if sc["suggestions"]:
+                                st.markdown(
+                                    "- 你是不是想寫："
+                                    + "、".join(f"**{c}**（官方語料 {n} 次，差 {d} 個字母）" for c, d, n in sc["suggestions"])
+                                )
+                            if sc["odd_chars"]:
+                                st.markdown("- 寫法提醒：字母 " + "、".join(f"「{c}」" for c in sc["odd_chars"]) + " 在官方語料中幾乎沒有出現過")
                         if etymology_text and example_zh and not note:
                             st.markdown(f"- **語源說明**: {etymology_text}")
                         st.markdown(f"- **本站總用例數**: `{occ_count}` 次（官方語料 {corpus_n} ＋ 社群例句 {comm_n}）")
@@ -1245,6 +1412,7 @@ if main_menu == "miAI ko / 我要用AI":
 
                         # 依「這位使用者自己」的打字與投票習慣，把回應中的字換成他慣用的拼法
                         prefs = get_spelling_prefs(st.session_state.user_info["username"], text_input)
+                        ai_data["ai_reply_tao_raw"] = ai_data.get("ai_reply_tao", "")  # 個人化之前的原始輸出
                         ai_data["ai_reply_tao"], swaps = apply_spelling_prefs(ai_data.get("ai_reply_tao", ""), prefs)
                         if swaps:
                             ety = ai_data.get("etymology") if isinstance(ai_data.get("etymology"), dict) else {}
@@ -1281,6 +1449,9 @@ if main_menu == "miAI ko / 我要用AI":
                     user_input_text=user_sentence,
                 )
                 st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{ai_data.get('user_translation', '')}</div>", unsafe_allow_html=True)
+                _notes_user = spellcheck_notes(user_sentence)
+                if _notes_user:
+                    st.caption("🔎 拼寫檢查：" + "；".join(_notes_user))
 
             st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊有螢光標籤的單字查看說明與投票)")
             render_interactive_sentence(
@@ -1297,6 +1468,9 @@ if main_menu == "miAI ko / 我要用AI":
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
             if ai_data.get("spelling_swaps"):
                 st.caption("已依您的慣用拼法調整：" + "、".join(f"{o} → {n}" for o, n in ai_data["spelling_swaps"].items()))
+            _notes_reply = spellcheck_notes(ai_data.get("ai_reply_tao", ""))
+            if _notes_reply:
+                st.caption("🔎 拼寫檢查：" + "；".join(_notes_reply))
 
             st.markdown(
                 f"""
@@ -1358,6 +1532,10 @@ if main_menu == "miAI ko / 我要用AI":
                         e_r_zh,
                         is_edited=True,
                         is_error=True,
+                        edit_record=build_edit_record(
+                            ai_data, q_orig,
+                            lower_first_char(e_q_tao), e_q_trans, lower_first_char(e_r_tao), e_r_zh,
+                        ),
                     ):
                         st.success("🎉 已成功更新修正版")
                         del st.session_state.ai_data
@@ -1421,6 +1599,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             build_word_index.clear()
             load_vote_data.clear()
             load_word_notes.clear()
+            _spell_resources.clear()
+            spell_check_word.clear()
             st.rerun()
 
     try:
