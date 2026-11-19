@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 
 from google.api_core.exceptions import ResourceExhausted
@@ -259,13 +260,36 @@ def delete_feedback_item(feedback_id, current_username):
         return False, f"刪除失敗：{e}"
 
 
+def fetch_all_rows(table, columns="*", order=None, eq=None, page=1000):
+    """
+    Supabase 單次查詢預設最多只回傳 1000 筆；這裡分頁讀完整張表。
+    order: [(欄位, 是否遞減), ...]；排序欄位不存在時自動退回不排序。
+    """
+    rows, start = [], 0
+    while True:
+        q = supabase.from_(table).select(columns)
+        for k, v in (eq or {}).items():
+            q = q.eq(k, v)
+        for col, desc in (order or []):
+            q = q.order(col, desc=desc)
+        try:
+            data = q.range(start, start + page - 1).execute().data or []
+        except Exception:
+            if order:
+                return fetch_all_rows(table, columns, None, eq, page)
+            raise
+        rows.extend(data)
+        if len(data) < page:
+            return rows
+        start += page
+
+
 # --- 4. 語料庫讀取與檢索 ---
 @st.cache_data(ttl=300)
 def load_all_raw_corpus():
     corpus_items = []
     try:
-        res_corpus = supabase.from_("corpus").select("*").execute()
-        for r in res_corpus.data:
+        for r in fetch_all_rows("corpus", order=[("id", False)]):
             corpus_items.append(
                 {
                     "id": f"Corpus ID #{r.get('id')}",
@@ -279,23 +303,17 @@ def load_all_raw_corpus():
         st.warning(f"⚠️ 讀取 corpus 語料庫提示：{e}")
 
     try:
-        res_feedback = (
-            supabase.from_("feedback")
-            .select("*")
-            .eq("is_ready_for_ai", 1)
-            .execute()
-        )
-        res_votes = supabase.from_("community_votes").select("feedback_id, vote_result").execute()
+        ready_rows = fetch_all_rows("feedback", order=[("id", False)], eq={"is_ready_for_ai": 1})
+        vote_rows = fetch_all_rows("community_votes", "feedback_id, vote_result", order=[("id", False)])
 
         vote_counts = {}
-        if res_votes.data:
-            for v in res_votes.data:
-                fid = v.get("feedback_id")
-                result = v.get("vote_result")
-                if fid is not None and result == "贊同":
-                    vote_counts[fid] = vote_counts.get(fid, 0) + 1
+        for v in vote_rows:
+            fid = v.get("feedback_id")
+            result = v.get("vote_result")
+            if fid is not None and result == "贊同":
+                vote_counts[fid] = vote_counts.get(fid, 0) + 1
 
-        for r in res_feedback.data:
+        for r in ready_rows:
             f_id = r.get("id")
             if vote_counts.get(f_id, 0) >= 15:
                 corpus_items.append(
@@ -397,12 +415,14 @@ def algorithm_first_processing(user_text):
 
 # --- 5. 單字用例統計、螢光標註與投票 ---
 HIGHLIGHT_THRESHOLD = 10  # 用例 <= 10 → 黃色；> 10 → 一般單字不標示
-WORD_STRIP_CHARS = ".,!?;:\"“”()[]「」『』。，！？；：、…"
+WORD_STRIP_CHARS = ".,!?;:\"“”()[]「」『』。，！？；：、…—–"
 
 
 def normalize_word(token):
-    """全站統一的單字識別：去除頭尾標點並轉小寫。"""
-    return token.strip(WORD_STRIP_CHARS).lower()
+    """全站統一的單字識別：Unicode 正規化(NFC)、統一撇號、去除頭尾標點並轉小寫。"""
+    t = unicodedata.normalize("NFC", token or "")
+    t = t.replace("’", "'").replace("ʼ", "'").replace("‘", "'")
+    return t.strip(WORD_STRIP_CHARS).lower()
 
 
 def split_token(token):
@@ -415,30 +435,30 @@ def split_token(token):
 @st.cache_data(ttl=300)
 def build_word_index():
     """
-    單字 -> {'count': 在本網站出現的總次數, 'zh': 一則例句翻譯}。
-    來源 = 官方語料庫 + feedback 表中所有已儲存的例句（使用者輸入 q_original 與回應 tao_text）。
+    單字 -> {'count': 本站總出現次數, 'corpus': 官方語料次數, 'community': 社群例句次數, 'zh': 一則例句翻譯}。
+    社群例句 = feedback 表中所有已儲存的例句（使用者輸入 q_original 與回應 tao_text）。
     同一句用到兩次就算兩次；例句被刪除後，下次重算時自然扣掉。
     """
     index = {}
 
-    def add(text, zh):
+    def add(text, zh, source):
         for tok in (text or "").split():
             w = normalize_word(tok)
             if not w:
                 continue
-            entry = index.setdefault(w, {"count": 0, "zh": zh})
+            entry = index.setdefault(w, {"count": 0, "corpus": 0, "community": 0, "zh": zh})
             entry["count"] += 1
+            entry[source] += 1
 
     # 官方語料；已驗證而併入語料的 feedback 略過，改由下面的 feedback 全量計算，避免重複
     for item in load_all_raw_corpus():
         if not item.get("is_feedback"):
-            add(item["tao"], item["zh"])
+            add(item["tao"], item["zh"], "corpus")
 
     try:
-        res = supabase.from_("feedback").select("q_original, q_trans, tao_text, zh_text").execute()
-        for r in res.data or []:
-            add(r.get("q_original"), r.get("q_trans"))
-            add(r.get("tao_text"), r.get("zh_text"))
+        for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text"):
+            add(r.get("q_original"), r.get("q_trans"), "community")
+            add(r.get("tao_text"), r.get("zh_text"), "community")
     except Exception:
         pass
 
@@ -488,15 +508,10 @@ def load_word_notes():
     """單字 -> {'description', 'editor', 'created_at'}；使用者校正過的描述，同一字以最新一筆為準。"""
     notes = {}
     try:
-        res = (
-            supabase.from_("word_notes")
-            .select("word, description, editor, created_at")
-            .order("id")
-            .execute()
-        )
+        rows = fetch_all_rows("word_notes", "word, description, editor, created_at", order=[("id", False)])
     except Exception:
         return notes
-    for r in res.data or []:
+    for r in rows:
         w = normalize_word(r.get("word") or "")
         d = (r.get("description") or "").strip()
         if w and d:
@@ -614,7 +629,7 @@ def load_vote_data():
     """
     empty = {"tally": {}, "group_of": {}, "members": {}, "user_picks": {}}
     try:
-        res = supabase.from_("community_votes").select("voter_id, vote_result, hidden_suggestion").execute()
+        vote_rows = fetch_all_rows("community_votes", "voter_id, vote_result, hidden_suggestion", order=[("id", False)])
     except Exception:
         return empty
 
@@ -629,7 +644,7 @@ def load_vote_data():
         return x
 
     tally, rows = {}, []
-    for v in res.data or []:
+    for v in vote_rows:
         parsed = _parse_vote(v)
         if not parsed:
             continue
@@ -671,14 +686,9 @@ def sentence_key(fb_id, sentence_id):
 
 def _fetch_user_votes(voter_id):
     """直接查 Supabase：回傳這個帳號已投過的 {(例句識別, 單字)}。查詢失敗會丟出例外。"""
-    res = (
-        supabase.from_("community_votes")
-        .select("feedback_id, hidden_suggestion")
-        .eq("voter_id", voter_id)
-        .execute()
-    )
+    rows = fetch_all_rows("community_votes", "feedback_id, hidden_suggestion", eq={"voter_id": voter_id})
     keys = set()
-    for v in res.data or []:
+    for v in rows:
         sug = str(v.get("hidden_suggestion", "") or "").lower()
         m = re.search(r"word_key:(.+?)\s*(?:\||$)", sug)
         if not m:
@@ -708,15 +718,10 @@ def load_user_typed_words(username):
     """此帳號自己打過的字：已儲存的輸入句，以及自己修改過的回應句。AI 原樣回應的句子不算。"""
     words = []
     try:
-        res = (
-            supabase.from_("feedback")
-            .select("q_original, tao_text, is_edited")
-            .eq("user_id", username)
-            .execute()
-        )
+        rows = fetch_all_rows("feedback", "q_original, tao_text, is_edited", eq={"user_id": username})
     except Exception:
         return words
-    for r in res.data or []:
+    for r in rows:
         texts = [r.get("q_original")]
         if r.get("is_edited"):
             texts.append(r.get("tao_text"))
@@ -771,7 +776,7 @@ def apply_spelling_prefs(text, prefs):
     out, swaps = [], {}
     for tok in text.split():
         lead, core, trail = split_token(tok)
-        new = prefs.get(core.lower()) if core else None
+        new = prefs.get(normalize_word(core)) if core else None
         if new:
             if core[:1].isupper():
                 new = new[:1].upper() + new[1:]
@@ -817,7 +822,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                 _plain(lead, "tao-lead")
 
             if w:
-                clean_w = w.lower()
+                clean_w = normalize_word(w)
                 info = word_index.get(clean_w, {})
                 occ_count = info.get("count", 0)
                 level = classify_word(occ_count, clean_w in user_words, is_ai_generated, user_accepted)
@@ -832,7 +837,13 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         zh_meaning = note["description"]
                     else:
                         zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
-                    category_title = "🔴 AI 自創字" if level == "red" else "🟡 使用者輸入 / 低用例詞彙"
+                    corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
+                    if level == "red":
+                        category_title = "🔴 AI 自創字（官方語料與社群例句都沒有）"
+                    elif occ_count == 0:
+                        category_title = "🟡 使用者輸入的字（官方語料與社群例句都沒有）"
+                    else:
+                        category_title = f"🟡 低用例詞彙（官方語料有 {corpus_n} 次，用例 10 次以內）"
                     tag = "hlR" if level == "red" else "hlY"
 
                     # 同一個詞的異體字（通過驗證才會成組）與各自票數
@@ -851,7 +862,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         st.markdown(f"- **分類**: {category_title}")
                         if etymology_text and example_zh and not note:
                             st.markdown(f"- **語源說明**: {etymology_text}")
-                        st.markdown(f"- **本站總用例數**: `{occ_count}` 次")
+                        st.markdown(f"- **本站總用例數**: `{occ_count}` 次（官方語料 {corpus_n} ＋ 社群例句 {comm_n}）")
 
                         if current_user:
                             current_desc = note["description"] if note else etymology_text
@@ -1306,9 +1317,33 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與單字用法投票", is_title=True), 
         unsafe_allow_html=True
     )
+    with st.expander("🧪 語料庫檢索狀態（檢查標註是否正確）"):
+        try:
+            _raw = load_all_raw_corpus()
+            _official = [it for it in _raw if not it.get("is_feedback")]
+            _widx = build_word_index()
+            st.markdown(
+                f"- 官方語料：**{len(_official)}** 句；已驗證併入的社群語料：**{len(_raw) - len(_official)}** 句\n"
+                f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次才是一般單字，其餘會標示螢光"
+            )
+            if not _official:
+                st.error("沒有讀到任何官方語料：請確認 corpus 資料表、欄位 tao_text / zh_text，以及 select 權限。")
+            else:
+                _top = sorted(_widx.items(), key=lambda kv: -kv[1]["count"])[:10]
+                st.markdown("- 最常出現的字：" + "、".join(f"{w}（{e['count']}）" for w, e in _top))
+                _s = _official[0]
+                st.caption(f"斷詞範例：{_s['tao']} → {[normalize_word(t) for t in _s['tao'].split() if normalize_word(t)]}")
+        except Exception as diag_err:
+            st.error(f"診斷失敗：{diag_err}")
+        if st.button("🔄 重新載入語料庫（清除快取）", key="reload_corpus_cache"):
+            load_all_raw_corpus.clear()
+            build_word_index.clear()
+            load_vote_data.clear()
+            load_word_notes.clear()
+            st.rerun()
+
     try:
-        res_feedback = supabase.from_("feedback").select("*").order("timestamp", desc=True).execute()
-        feedbacks = res_feedback.data if res_feedback.data else []
+        feedbacks = fetch_all_rows("feedback", order=[("timestamp", True), ("id", True)])
 
         if not feedbacks:
             st.info("目前尚無採集到的語料。")
@@ -1356,6 +1391,19 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
                 forms = {query, *variants} if include_variants else {query}
                 shown = [fb for fb in feedbacks if tok_sets[fb["id"]] & forms]
+
+                official = [it for it in load_all_raw_corpus() if not it.get("is_feedback")]
+                corpus_hits = [
+                    it for it in official
+                    if forms & {normalize_word(t) for t in (it.get("tao") or "").split()}
+                ]
+                st.markdown(f"📚 官方語料庫：**{len(corpus_hits)}** 筆句子")
+                if corpus_hits:
+                    with st.expander("查看官方語料例句"):
+                        for it in corpus_hits[:20]:
+                            st.markdown(f"- {it['tao']} — {it['zh']}")
+                        if len(corpus_hits) > 20:
+                            st.caption(f"僅顯示前 20 筆，共 {len(corpus_hits)} 筆。")
                 if include_variants:
                     st.markdown(f"合計 **{len(shown)}** 筆（同一筆不重複計算）")
                 if not shown:
