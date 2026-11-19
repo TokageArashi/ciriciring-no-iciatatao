@@ -260,6 +260,33 @@ def delete_feedback_item(feedback_id, current_username):
         return False, f"刪除失敗：{e}"
 
 
+CORPUS_TAO_COLS = ("tao_text", "tao", "yami_text", "yami")
+CORPUS_ZH_COLS = ("zh_text", "zh", "chinese", "zh_tw", "translation")
+
+
+def _first_col(row, names):
+    """依序找第一個有內容的欄位；欄位不存在或為 null 時回傳空字串。"""
+    for n in names:
+        v = row.get(n)
+        if v:
+            return str(v)
+    return ""
+
+
+def diagnose_corpus_table():
+    """直接查 corpus 資料表，回報錯誤、可讀到的筆數與實際欄位名稱。"""
+    info = {"error": None, "count": None, "columns": []}
+    try:
+        res = supabase.from_("corpus").select("*", count="exact").limit(1).execute()
+        rows = res.data or []
+        info["count"] = res.count if getattr(res, "count", None) is not None else len(rows)
+        if rows:
+            info["columns"] = list(rows[0].keys())
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
 def fetch_all_rows(table, columns="*", order=None, eq=None, page=1000):
     """
     Supabase 單次查詢預設最多只回傳 1000 筆；這裡分頁讀完整張表。
@@ -290,13 +317,15 @@ def load_all_raw_corpus():
     corpus_items = []
     try:
         for r in fetch_all_rows("corpus", order=[("id", False)]):
+            tao = _first_col(r, CORPUS_TAO_COLS)
+            zh = _first_col(r, CORPUS_ZH_COLS)
             corpus_items.append(
                 {
                     "id": f"Corpus ID #{r.get('id')}",
-                    "tao": r.get("tao_text", ""),
-                    "zh": r.get("zh_text", ""),
-                    "source": r.get("source", "官方語料庫"),
-                    "full_text": f"{r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
+                    "tao": tao,
+                    "zh": zh,
+                    "source": r.get("source") or "官方語料庫",
+                    "full_text": f"{tao} {zh}".lower(),
                 }
             )
     except Exception as e:
@@ -1327,8 +1356,33 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次才是一般單字，其餘會標示螢光"
             )
             if not _official:
-                st.error("沒有讀到任何官方語料：請確認 corpus 資料表、欄位 tao_text / zh_text，以及 select 權限。")
+                _d = diagnose_corpus_table()
+                if _d["error"]:
+                    st.error(f"查詢 corpus 資料表時發生錯誤：{_d['error']}")
+                    st.caption("若訊息是找不到資料表（PGRST205），代表資料表名稱不是 corpus 或尚未建立；若是權限錯誤，請檢查金鑰與 RLS policy。")
+                elif not _d["count"]:
+                    st.error("查詢成功，但 corpus 讀到 0 筆。")
+                    st.markdown(
+                        "常見原因有兩個：\n"
+                        "1. 資料表本身是空的（到 Supabase 的 Table Editor 確認 corpus 有沒有資料）。\n"
+                        "2. 資料表有資料，但啟用了 RLS 又沒有 select policy。這種情況 Supabase **不會報錯，只會回傳空結果**。"
+                        "請到 SQL Editor 執行："
+                    )
+                    st.code(
+                        "alter table public.corpus enable row level security;\n"
+                        "create policy \"corpus select\" on public.corpus for select using (true);",
+                        language="sql",
+                    )
+                else:
+                    st.error(f"corpus 有 {_d['count']} 筆，但沒有任何一筆讀得到 {CORPUS_TAO_COLS} 其中一個欄位的內容。")
+                    st.write("資料表實際的欄位：", _d["columns"])
             else:
+                _empty = sum(1 for it in _official if not it["tao"].strip())
+                if _empty == len(_official):
+                    st.error("讀到了語料列，但達悟語欄位全是空的：欄位名稱可能不同，請對照下面的實際欄位。")
+                    st.write("資料表實際的欄位：", diagnose_corpus_table()["columns"])
+                elif _empty:
+                    st.warning(f"有 {_empty} 筆語料的達悟語欄位是空的。")
                 _top = sorted(_widx.items(), key=lambda kv: -kv[1]["count"])[:10]
                 st.markdown("- 最常出現的字：" + "、".join(f"{w}（{e['count']}）" for w, e in _top))
                 _s = _official[0]
