@@ -332,6 +332,22 @@ def delete_feedback_item(feedback_id, current_username):
 
 CORPUS_TAO_COLS = ("tao_text", "tao", "yami_text", "yami")
 CORPUS_ZH_COLS = ("zh_text", "zh", "chinese", "zh_tw", "translation")
+WORDLIST_SOURCE = "單字表匯入"  # import_words.sql 寫入 corpus 的詞條來源（單字／片語，不是句子）
+UNVERIFIED_PREFIX = "AI生成（待審）"  # import_generated_examples.sql 寫入的來源前綴：尚未經母語者確認
+
+
+def is_unverified(item):
+    """待審的 AI 生成句：不算進用例、不參與比對，也不當作提示詞的參考。"""
+    return str(item.get("source") or "").startswith(UNVERIFIED_PREFIX)
+
+
+def is_sentence_item(item):
+    """整句比對與句子參考只用已驗證的「句子」：排除單字表詞條、只有一個詞的條目、待審的 AI 生成句。"""
+    return (
+        item.get("source") != WORDLIST_SOURCE
+        and not is_unverified(item)
+        and len((item.get("tao") or "").split()) > 1
+    )
 
 
 def _first_col(row, names):
@@ -444,7 +460,7 @@ load_all_raw_corpus.clear = _load_all_raw_corpus_cached.clear
 
 
 def search_relevant_corpus(user_input, top_k=3):
-    all_corpus = load_all_raw_corpus()
+    all_corpus = [it for it in load_all_raw_corpus() if is_sentence_item(it)]
     if not all_corpus:
         return []
 
@@ -452,17 +468,24 @@ def search_relevant_corpus(user_input, top_k=3):
         matched_items = all_corpus[-top_k:]
     else:
         clean_input = user_input.lower().strip()
-        keywords = set(re.findall(r"\w+", clean_input))
+        user_tokens = [normalize_word(t) for t in user_input.split()]
+        user_set = {t for t in user_tokens if t}
+        phrase = " ".join(t for t in user_tokens if t)
 
         scored_items = []
         for item in all_corpus:
             score = 0
-            if clean_input in item["full_text"]:
+            item_words = [normalize_word(t) for t in item["tao"].split()]
+            item_set = {t for t in item_words if t}
+            item_plain = {t.replace("'", "") for t in item_set}
+            if clean_input in item["full_text"] or (phrase and phrase in " ".join(item_words)):
                 score += 100
 
-            for kw in keywords:
-                if kw in item["full_text"]:
+            for kw in user_set:
+                if kw in item_set:
                     score += 10
+                elif kw.replace("'", "") in item_plain:
+                    score += 7  # 只差喉塞音符號
 
             if score > 0:
                 scored_items.append((score, item))
@@ -486,7 +509,7 @@ def algorithm_first_processing(user_text):
     if not user_text:
         return None
 
-    all_corpus = load_all_raw_corpus()
+    all_corpus = [it for it in load_all_raw_corpus() if is_sentence_item(it)]
     clean_input = user_text.lower().strip()
 
     for item in all_corpus:
@@ -501,16 +524,24 @@ def algorithm_first_processing(user_text):
                 "is_algorithm": True,
             }
 
-    keywords = set(re.findall(r"\w+", clean_input))
+    # 以「單字」為單位比對（不再用子字串，避免 a、asa 這類短字誤中大量句子）：
+    # 至少 2 個字相同，且輸入的字有 80% 以上出現在該句（4 個字以內須全部出現）、兩邊字集的重疊度（Jaccard）至少 75%；
+    # 只差一個名詞的句子（例如 asa ka ino 與 asa ka kois）不會被當成同一句
+    user_tokens = {normalize_word(t) for t in user_text.split()} - {""}
     best_item = None
-    max_matches = 0
+    best_key = (0, 0.0)
     for item in all_corpus:
-        matches = sum(1 for kw in keywords if kw in item["full_text"])
-        if matches > max_matches:
-            max_matches = matches
+        item_tokens = {normalize_word(t) for t in item["tao"].split()} - {""}
+        matches = len(user_tokens & item_tokens)
+        if matches < 2 or not user_tokens:
+            continue
+        coverage = matches / len(user_tokens)
+        jaccard = matches / len(user_tokens | item_tokens)
+        if coverage >= 0.8 and jaccard >= 0.75 and (matches, jaccard) > best_key:
+            best_key = (matches, jaccard)
             best_item = item
 
-    if best_item and max_matches >= 2:
+    if best_item:
         return {
             "user_recognized_tao": best_item["tao"],
             "user_translation": best_item["zh"],
@@ -529,10 +560,19 @@ HIGHLIGHT_THRESHOLD = 10  # 用例 <= 10 → 黃色；> 10 → 一般單字不�
 WORD_STRIP_CHARS = ".,!?;:\"“”()[]「」『』。，！？；：、…—–"
 
 
+# 喉塞音在文字中常被寫成各種撇號或相近符號；全站一律當作半形 ' 處理
+APOSTROPHE_CHARS = "’‘ʼʻ´`′ʹʔ"
+_APOS_TABLE = str.maketrans({c: "'" for c in APOSTROPHE_CHARS})
+
+
+def canon_apostrophes(text):
+    """把 ’ ‘ ʼ ʻ ´ ` ′ ʹ ʔ 統一換成半形撇號 '（U+0027）。"""
+    return (text or "").translate(_APOS_TABLE)
+
+
 def normalize_word(token):
-    """全站統一的單字識別：Unicode 正規化(NFC)、統一撇號、去除頭尾標點並轉小寫。"""
-    t = unicodedata.normalize("NFC", token or "")
-    t = t.replace("’", "'").replace("ʼ", "'").replace("‘", "'")
+    """全站統一的單字識別：Unicode 正規化(NFC)、統一喉塞音符號、去除頭尾標點並轉小寫。"""
+    t = canon_apostrophes(unicodedata.normalize("NFC", token or ""))
     return t.strip(WORD_STRIP_CHARS).lower()
 
 
@@ -546,25 +586,30 @@ def split_token(token):
 @st.cache_data(ttl=300)
 def _build_word_index_cached():
     """
-    單字 -> {'count': 本站總出現次數, 'corpus': 官方語料次數, 'community': 社群例句次數, 'zh': 一則例句翻譯}。
+    單字 -> {'count': 本站總出現次數, 'corpus': 官方語料次數, 'community': 社群例句次數, 'zh': 一則例句翻譯, 'glosses': 單字表釋義}。
     社群例句 = feedback 表中所有已儲存的例句（使用者輸入 q_original 與回應 tao_text）。
     同一句用到兩次就算兩次；例句被刪除後，下次重算時自然扣掉。
     """
     index = {}
 
-    def add(text, zh, source):
-        for tok in (text or "").split():
+    def add(text, zh, source, wordlist=False):
+        toks = (text or "").split()
+        for tok in toks:
             w = normalize_word(tok)
             if not w:
                 continue
-            entry = index.setdefault(w, {"count": 0, "corpus": 0, "community": 0, "zh": zh})
+            entry = index.setdefault(w, {"count": 0, "corpus": 0, "community": 0, "zh": zh, "glosses": []})
             entry["count"] += 1
             entry[source] += 1
+            # 單字表的單字詞條：釋義記到這個字上（一字多義會累積多筆）
+            if wordlist and len(toks) == 1 and zh and zh not in entry["glosses"]:
+                entry["glosses"].append(zh)
 
     # 官方語料；已驗證而併入語料的 feedback 略過，改由下面的 feedback 全量計算，避免重複
     for item in load_all_raw_corpus():
         if not item.get("is_feedback"):
-            add(item["tao"], item["zh"], "corpus")
+            if not is_unverified(item):
+                add(item["tao"], item["zh"], "corpus", wordlist=True)  # 只有一個詞的條目會記為該字的釋義
 
     try:
         for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text"):
@@ -593,10 +638,13 @@ build_word_index.clear = _build_word_index_cached.clear
 #     word        text not null,
 #     description text not null,
 #     editor      text,
-#     created_at  timestamptz default now()
+#     created_at  timestamptz default now(),
+#     tag         text                       -- 'loanword' = 現代借詞（華語音譯）
 #   );
 #   create index on word_notes (word);
+# 已建立過資料表的話，補上欄位：  alter table public.word_notes add column if not exists tag text;
 # （若資料表有啟用 RLS，需比照 community_votes 加上 select / insert policy）
+LOANWORD_TAG = "loanword"
 REL_SPELLING = "拼法不同（同一個字的不同寫法）"
 REL_TRANSLATION = "譯詞相同（不同的字，意思完全一樣）"
 
@@ -629,23 +677,33 @@ def load_word_notes():
     """單字 -> {'description', 'editor', 'created_at'}；使用者校正過的描述，同一字以最新一筆為準。"""
     notes = {}
     try:
-        rows = fetch_all_rows("word_notes", "word, description, editor, created_at", order=[("id", False)])
+        rows = fetch_all_rows("word_notes", "word, description, editor, created_at, tag", order=[("id", False)])
     except Exception:
-        return notes
+        try:  # 尚未新增 tag 欄位時，退回舊的讀法
+            rows = fetch_all_rows("word_notes", "word, description, editor, created_at", order=[("id", False)])
+        except Exception:
+            return notes
     for r in rows:
         w = normalize_word(r.get("word") or "")
         d = (r.get("description") or "").strip()
         if w and d:
-            notes[w] = {"description": d, "editor": r.get("editor"), "created_at": r.get("created_at")}
+            notes[w] = {"description": d, "editor": r.get("editor"), "created_at": r.get("created_at"), "tag": r.get("tag")}
     return notes
 
 
-def save_word_note(word, description, editor):
-    supabase.from_("word_notes").insert(
-        {"word": word, "description": description.strip(), "editor": editor}
-    ).execute()
+def is_loanword(word, notes):
+    """是否被標為現代借詞（華語音譯）。"""
+    return (notes.get(word) or {}).get("tag") == LOANWORD_TAG
+
+
+def save_word_note(word, description, editor, tag=None):
+    row = {"word": word, "description": description.strip(), "editor": editor}
+    if tag:                       # 沒有標籤時不寫入該欄，等於清除標籤（最新一筆為準）
+        row["tag"] = tag
+    supabase.from_("word_notes").insert(row).execute()
     load_word_notes.clear()
     load_vote_data.clear()  # 異體字是否成立取決於描述，所以一併重算
+    load_variant_stats.clear()
 
 
 def link_is_valid(a, b, rel, notes):
@@ -698,6 +756,58 @@ def check_variant_proposal(word, alt, rel, shared_desc, notes):
     return True, "", to_save
 
 
+def build_dictionary_context(text, limit=40):
+    """從使用者輸入中找出單字表有收錄的字，整理成給模型的詞典參考。"""
+    idx = build_word_index()
+    lines, seen = [], set()
+    for tok in (text or "").split():
+        w = normalize_word(tok)
+        if not w or w in seen:
+            continue
+        seen.add(w)
+        gl = idx.get(w, {}).get("glosses")
+        if gl:
+            lines.append(f"- {w}: {'；'.join(gl[:3])}")
+    return "\n".join(lines[:limit])
+
+
+def build_loanword_context(limit=80):
+    """社群已採用的現代借詞（華語音譯）：每個異體字群組只列用例最多的一個。"""
+    notes, idx = load_word_notes(), build_word_index()
+    group_of = load_vote_data()["group_of"]
+    best = {}
+    for w, n in notes.items():
+        if n.get("tag") != LOANWORD_TAG:
+            continue
+        key = group_of.get(w, w)
+        if key not in best or idx.get(w, {}).get("count", 0) > idx.get(best[key], {}).get("count", 0):
+            best[key] = w
+    lines = []
+    for w in sorted(best.values(), key=lambda x: -idx.get(x, {}).get("count", 0))[:limit]:
+        lines.append(f"- {w}: {re.sub(r'^華語音譯[：:]', '', notes[w]['description'])}")
+    return "\n".join(lines)
+
+
+def register_new_words(ai_data, final_tao, username):
+    """
+    使用者採納（儲存）含有 AI 音譯新詞的句子時，把「華語原詞」記成該詞的描述並標為現代借詞，
+    之後其他人的對話也會使用這個詞。已有描述的字不覆蓋。
+    """
+    new_words = ai_data.get("new_words") if isinstance(ai_data, dict) else None
+    if not isinstance(new_words, dict) or not new_words:
+        return
+    notes = load_word_notes()
+    present = {normalize_word(t) for t in (final_tao or "").split()}
+    for tao_w, zh in new_words.items():
+        w = normalize_word(tao_w)
+        if not w or not zh or w not in present or w in notes:
+            continue
+        try:
+            save_word_note(w, f"華語音譯：{zh}", f"AI生成（{username} 採納）", tag=LOANWORD_TAG)
+        except Exception:
+            pass
+
+
 def build_notes_context(*texts, limit=30):
     """從文字中找出有被使用者校正過描述的字，整理成給模型的參考。"""
     notes = load_word_notes()
@@ -731,19 +841,20 @@ def _deletions(w, max_d):
 def _spell_resources():
     """官方語料的詞表、刪除一到兩個字母的索引（快速找相近字），以及各字母出現在幾個不同單字中。"""
     idx = build_word_index()
-    deletes, chars, n_types = {}, {}, 0
+    deletes, chars, n_types, plain = {}, {}, 0, {}
     for w, e in idx.items():
         c = e.get("corpus", 0)
         if c <= 0:
             continue
         n_types += 1
+        plain.setdefault(w.replace("'", ""), set()).add(w)
         if len(w) >= SPELL_MIN_LEN and c >= SPELL_MIN_CANDIDATE_COUNT:
             for d in _deletions(w, 2):
                 deletes.setdefault(d, set()).add(w)
         for ch in set(w):
             if ch.isalpha() or ch == "'":
                 chars[ch] = chars.get(ch, 0) + 1
-    return {"idx": idx, "deletes": deletes, "chars": chars, "n_types": n_types}
+    return {"idx": idx, "deletes": deletes, "chars": chars, "n_types": n_types, "plain": plain}
 
 
 @st.cache_data(ttl=300)
@@ -752,10 +863,16 @@ def spell_check_word(word):
     回傳 {'suggestions': [(相近的已知字, 差幾個字母, 官方語料次數)], 'odd_chars': [罕見字母]}。
     相近字須在官方語料中的次數 >= max(3, 3 × 這個字本身的總用例)，避免把正常的罕用字誤判成拼錯。
     """
-    out = {"suggestions": [], "odd_chars": []}
+    out = {"suggestions": [], "odd_chars": [], "glottal": []}
     res = _spell_resources()
     if not res["chars"] or not word:
         return out
+
+    # 只差喉塞音符號（'）的已知字：不論用例多寡都提醒（使用者可能省略或多寫了喉塞音）
+    out["glottal"] = sorted(
+        ((c, res["idx"][c]["corpus"]) for c in res["plain"].get(word.replace("'", ""), set()) if c != word),
+        key=lambda x: -x[1],
+    )[:3]
 
     rare_cut = 2 if res["n_types"] >= 500 else 0
     out["odd_chars"] = sorted(
@@ -791,7 +908,9 @@ def spellcheck_notes(sentence, limit=5):
             continue
         seen.add(w)
         sc = spell_check_word(w)
-        if sc["suggestions"]:
+        if sc["glottal"]:
+            notes.append(f"「{w}」只差喉塞音符號 → {'、'.join(g[0] for g in sc['glottal'])}")
+        elif sc["suggestions"]:
             notes.append(f"「{w}」→ 你是不是想寫 {'、'.join(s[0] for s in sc['suggestions'])}")
         elif sc["odd_chars"]:
             notes.append(f"「{w}」含有官方語料中罕見的字母 {'、'.join(sc['odd_chars'])}")
@@ -835,9 +954,9 @@ def load_vote_data():
     members    {群組代表字: [同組拼法]}
     user_picks {帳號: {群組代表字: {拼法: 次數}}}
     """
-    empty = {"tally": {}, "group_of": {}, "members": {}, "user_picks": {}}
+    empty = {"tally": {}, "group_of": {}, "members": {}, "user_picks": {}, "pick_rows": []}
     try:
-        vote_rows = fetch_all_rows("community_votes", "voter_id, vote_result, hidden_suggestion", order=[("id", False)])
+        vote_rows = fetch_all_rows("community_votes", "voter_id, vote_result, hidden_suggestion, region, age_group, gender", order=[("id", False)])
     except Exception:
         return empty
 
@@ -865,7 +984,18 @@ def load_vote_data():
                 ra, rb = find(word), find(pick)
                 if ra != rb:
                     parent[rb] = ra
-        rows.append((v.get("voter_id"), pick))
+        rows.append((v.get("voter_id"), pick, v.get("region"), v.get("age_group"), v.get("gender")))
+
+    # 人工整理的異體字連結（例如單字表匯入）：不需要再驗證，一律成立；資料表尚未建立時略過
+    try:
+        for r in fetch_all_rows("word_variants", "word_a, word_b"):
+            a, b = normalize_word(r.get("word_a")), normalize_word(r.get("word_b"))
+            if a and b and a != b:
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+    except Exception:
+        pass
 
     roots = {w: find(w) for w in list(parent)}
     members = {}
@@ -875,12 +1005,15 @@ def load_vote_data():
     group_of = {w: r for w, r in roots.items() if r in members}
 
     user_picks = {}
-    for voter, pick in rows:
-        if voter and pick and pick in group_of:
-            d = user_picks.setdefault(voter, {}).setdefault(group_of[pick], {})
-            d[pick] = d.get(pick, 0) + 1
+    pick_rows = []
+    for voter, pick, region, age, gender in rows:
+        if pick and pick in group_of:
+            pick_rows.append((voter, pick, region, age, gender))
+            if voter:
+                d = user_picks.setdefault(voter, {}).setdefault(group_of[pick], {})
+                d[pick] = d.get(pick, 0) + 1
 
-    return {"tally": tally, "group_of": group_of, "members": members, "user_picks": user_picks}
+    return {"tally": tally, "group_of": group_of, "members": members, "user_picks": user_picks, "pick_rows": pick_rows}
 
 
 def sentence_key(fb_id, sentence_id):
@@ -938,11 +1071,23 @@ def load_user_typed_words(username):
     return [w for w in words if w]
 
 
-def get_spelling_prefs(username, current_text=""):
+def canonicalize_ai_data(ai_data):
+    """AI（或語料）回傳的句子與 etymology 鍵，喉塞音符號一律統一成半形 '。"""
+    if not isinstance(ai_data, dict):
+        return ai_data
+    for k in ("user_recognized_tao", "ai_reply_tao"):
+        if isinstance(ai_data.get(k), str):
+            ai_data[k] = canon_apostrophes(ai_data[k])
+    for field in ("etymology", "new_words"):
+        if isinstance(ai_data.get(field), dict):
+            ai_data[field] = {canon_apostrophes(k): v for k, v in ai_data[field].items()}
+    return ai_data
+
+
+def get_personal_choice(username, current_text=""):
     """
-    {單字: 這個帳號慣用的拼法}（只列出該被換掉的字）。
-    只看這個帳號自己的打字（含這次輸入）與自己的投票選擇，不受其他使用者影響；
-    各拼法分數相同時不調整。
+    {群組代表字: 這個帳號慣用的拼法}。只看這個帳號自己的打字（含這次輸入）與自己的投票選擇，
+    不受其他使用者影響；各拼法分數相同（沒有明顯傾向）的群組不列出。
     """
     if not username:
         return {}
@@ -965,16 +1110,150 @@ def get_spelling_prefs(username, current_text=""):
         for variant, n in picks.items():
             bump(root, variant, n)
 
-    prefs = {}
+    best = {}
     for root, d in score.items():
         ranked = sorted(d.items(), key=lambda kv: -kv[1])
         if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
             continue
-        best = ranked[0][0]
+        best[root] = ranked[0][0]
+    return best
+
+
+def get_spelling_prefs(username, current_text=""):
+    """{單字: 這個帳號慣用的拼法}（只列出該被換掉的字）。"""
+    vd = load_vote_data()
+    prefs = {}
+    for root, best in get_personal_choice(username, current_text).items():
         for m in vd["members"].get(root, []):
             if m != best:
                 prefs[m] = best
     return prefs
+
+
+def _region_list(value):
+    items = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+    return [s.strip() for s in items if s and s.strip()]
+
+
+@st.cache_data(ttl=60)
+def load_variant_stats():
+    """
+    異體字群組中的每個拼法：被幾個不同帳號使用過，以及在各部落／年齡層／性別的使用次數。
+    來源：使用者自己打的句子（輸入句與自己修改過的回應句）與投票時選的拼法；AI 原樣回應的句子不算。
+    """
+    vd = load_vote_data()
+    group_of = vd["group_of"]
+    stats, accounts = {}, {}
+    if not group_of:
+        return stats
+
+    def add(word, acct, region, age, gender):
+        s = stats.setdefault(word, {"accounts": 0, "region": {}, "age": {}, "gender": {}})
+        accounts.setdefault(word, set()).add(acct)
+        for r in _region_list(region):
+            s["region"][r] = s["region"].get(r, 0) + 1
+        if age:
+            s["age"][age] = s["age"].get(age, 0) + 1
+        if gender:
+            s["gender"][gender] = s["gender"].get(gender, 0) + 1
+
+    try:
+        rows = fetch_all_rows("feedback", "user_id, q_original, tao_text, is_edited, region, age_group, gender")
+    except Exception:
+        rows = []
+    for r in rows:
+        texts = [r.get("q_original")]
+        if r.get("is_edited"):
+            texts.append(r.get("tao_text"))
+        for w in {normalize_word(t) for tx in texts for t in (tx or "").split()}:
+            if w in group_of:
+                add(w, r.get("user_id"), r.get("region"), r.get("age_group"), r.get("gender"))
+    for voter, pick, region, age, gender in vd.get("pick_rows", []):
+        add(pick, voter, region, age, gender)
+    for w, accts in accounts.items():
+        stats[w]["accounts"] = len({a for a in accts if a})
+    return stats
+
+
+def variant_eligible(word, idx, stats, notes):
+    """
+    這個拼法能不能用在「和其他帳號的對話」：
+      · 現代借詞（華語音譯）：即使只有一個帳號、一個用例也可以；
+      · 官方語料或單字表已收錄：可以；
+      · 其餘：至少要有 2 個不同帳號使用過（只有一個帳號用的拼法，用例再多也不對其他人使用）。
+    """
+    if is_loanword(word, notes):
+        return True
+    if idx.get(word, {}).get("corpus", 0) > 0:
+        return True
+    return stats.get(word, {}).get("accounts", 0) >= 2
+
+
+def choose_default_variants(user_info, skip_roots=()):
+    """
+    個人沒有明顯傾向時，各異體字群組的預設用法：{群組代表字: {'pool': 可用拼法, 'preferred': 要換成的拼法}}。
+    可用拼法 ＝ 可對外使用的拼法中「用例前三多」，加上「該帳號的部落、年齡層、性別最常使用」的拼法；
+    句中的字不在這個範圍時，換成偏好的拼法（部落 > 年齡層 > 性別 > 用例最多）。
+    """
+    user_info = user_info or {}
+    vd = load_vote_data()
+    if not vd["members"]:
+        return {}
+    stats, idx, notes = load_variant_stats(), build_word_index(), load_word_notes()
+    regions = set(_region_list(user_info.get("region")))
+    age, gender = user_info.get("age_group"), user_info.get("gender")
+
+    out = {}
+    for root, members in vd["members"].items():
+        if root in skip_roots:
+            continue
+        elig = [m for m in members if variant_eligible(m, idx, stats, notes)]
+        if not elig:
+            continue
+        usage = {m: idx.get(m, {}).get("count", 0) for m in elig}
+        ranked = sorted(elig, key=lambda m: (-usage[m], m))
+
+        def favorite(kind, keys):
+            best, best_n = None, 0
+            for m in ranked:
+                n = sum(stats.get(m, {}).get(kind, {}).get(k, 0) for k in keys if k)
+                if n > best_n:
+                    best, best_n = m, n
+            return best
+
+        favs = [f for f in (favorite("region", regions), favorite("age", {age}), favorite("gender", {gender})) if f]
+        out[root] = {"pool": list(dict.fromkeys(ranked[:3] + favs)), "preferred": favs[0] if favs else ranked[0]}
+    return out
+
+
+def get_variant_policy(user_info, current_text=""):
+    """個人慣用優先；沒有明顯傾向的群組，改用一般用法。"""
+    personal = get_personal_choice((user_info or {}).get("username"), current_text)
+    return {"personal": personal, "defaults": choose_default_variants(user_info, skip_roots=set(personal))}
+
+
+def apply_variant_policy(text, policy):
+    """依 policy 調整句子中的異體字；回傳 (新句子, {原字: 新字})。"""
+    if not text or not policy:
+        return text, {}
+    group_of = load_vote_data()["group_of"]
+    personal, defaults = policy.get("personal", {}), policy.get("defaults", {})
+    out, swaps = [], {}
+    for tok in text.split():
+        lead, core, trail = split_token(tok)
+        w = normalize_word(core) if core else ""
+        root = group_of.get(w)
+        target = None
+        if root in personal:
+            target = personal[root]
+        elif root in defaults and w not in defaults[root]["pool"]:
+            target = defaults[root]["preferred"]
+        if target and target != w:
+            new = target[:1].upper() + target[1:] if core[:1].isupper() else target
+            swaps[core] = new
+            tok = f"{lead}{new}{trail}"
+        out.append(tok)
+    return " ".join(out), swaps
 
 
 def apply_spelling_prefs(text, prefs):
@@ -1041,8 +1320,11 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                     etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
                     example_zh = info.get("zh")
                     note = notes.get(clean_w)  # 使用者校正過的描述，優先於 AI / 例句的解釋
+                    gloss = "；".join(info.get("glosses", []))
                     if note:
                         zh_meaning = note["description"]
+                    elif gloss:
+                        zh_meaning = gloss
                     else:
                         zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
                     corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
@@ -1067,10 +1349,17 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         st.markdown(f"- **中文解釋**: {zh_meaning}")
                         if note:
                             st.caption(f"✏️ 已由 {note.get('editor') or '使用者'} 校正（{str(note.get('created_at') or '')[:10]}）")
+                            if note.get("tag") == LOANWORD_TAG:
+                                st.caption("🔁 現代借詞（華語音譯）：其他使用者的對話也會使用")
                         st.markdown(f"- **分類**: {category_title}")
                         sc = spell_check_word(clean_w)
-                        if sc["suggestions"] or sc["odd_chars"]:
+                        if sc["suggestions"] or sc["odd_chars"] or sc["glottal"]:
                             st.markdown("🔎 **拼寫與寫法檢查**")
+                            if sc["glottal"]:
+                                st.markdown(
+                                    "- 只差喉塞音符號（'）的已知字："
+                                    + "、".join(f"**{c}**（官方語料 {n} 次）" for c, n in sc["glottal"])
+                                )
                             if sc["suggestions"]:
                                 st.markdown(
                                     "- 你是不是想寫："
@@ -1078,7 +1367,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                                 )
                             if sc["odd_chars"]:
                                 st.markdown("- 寫法提醒：字母 " + "、".join(f"「{c}」" for c in sc["odd_chars"]) + " 在官方語料中幾乎沒有出現過")
-                        if etymology_text and example_zh and not note:
+                        if etymology_text and (example_zh or gloss) and not note:
                             st.markdown(f"- **語源說明**: {etymology_text}")
                         st.markdown(f"- **本站總用例數**: `{occ_count}` 次（官方語料 {corpus_n} ＋ 社群例句 {comm_n}）")
 
@@ -1090,16 +1379,22 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                                 key=f"desc_{key_prefix}_{idx}",
                                 height=80,
                             )
+                            loan_default = bool(note and note.get("tag") == LOANWORD_TAG)
+                            loan_flag = st.checkbox(
+                                "這是現代借詞（華語音譯）",
+                                value=loan_default,
+                                key=f"loan_{key_prefix}_{idx}",
+                            )
                             if others:
-                                st.caption(f"⚠️ 本字目前與 {'、'.join(others)} 互為異體字；描述若改成與它們不同，異體關係會自動解除。")
+                                st.caption(f"⚠️ 本字目前與 {'、'.join(others)} 互為異體字；使用者提出的異體關係，在描述改成與對方不同時會自動解除（單字表匯入的不受影響）。")
                             if st.button("儲存描述", key=f"btn_desc_{key_prefix}_{idx}"):
                                 try:
                                     nd = new_desc.strip()
                                     if not nd:
                                         raise ValueError("描述不可為空白。")
-                                    if nd == (current_desc or "").strip():
+                                    if nd == (current_desc or "").strip() and loan_flag == loan_default:
                                         raise ValueError("描述沒有變更。")
-                                    save_word_note(clean_w, nd, current_user)
+                                    save_word_note(clean_w, nd, current_user, tag=LOANWORD_TAG if loan_flag else None)
                                     st.success("✅ 已更新描述")
                                     st.rerun()
                                 except Exception as desc_err:
@@ -1109,7 +1404,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         st.markdown("#### 📊 異體字與票數（票數 ＝ 本站用例 ＋ 投票人數）")
                         for m in variants:
                             mark = "（本句）" if m == clean_w else ""
-                            desc_m = (notes.get(m) or {}).get("description")
+                            desc_m = (notes.get(m) or {}).get("description") or "；".join(word_index.get(m, {}).get("glosses", []))
                             desc_part = f"〔{desc_m}〕" if desc_m else ""
                             st.markdown(f"- **{m}**{mark}{desc_part}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
 
@@ -1222,6 +1517,8 @@ def process_ai_input(text_prompt=None):
     )
 
     notes_context = build_notes_context(query_str, *legal_corpus) or "（無）"
+    dictionary_context = build_dictionary_context(query_str) or "（無）"
+    loanword_context = build_loanword_context() or "（無）"
 
     system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。目前處於「AI 備援生成」模式。
@@ -1232,9 +1529,18 @@ def process_ai_input(text_prompt=None):
 【使用者已校正的單字描述（以此為準；回應或 etymology 用到這些字時，請沿用此描述）】:
 {notes_context}
 
+【單字表釋義（詞典；若與上面使用者校正的描述衝突，以校正描述為準）】:
+{dictionary_context}
+
+【現代借詞表（社群已採用；遇到這些概念請直接使用，不要另創新詞）】:
+{loanword_context}
+
 【絕對強制規則】：
 1. 請勿在生成的達悟語句子中包含任何如 `[使用者推薦]` 或 `[AI自創]` 的文字標籤，保持句子乾淨。
 2. etymology 必須是一個 JSON 物件 (Dictionary)，鍵為達悟語單字，值為該單字的中文翻譯與語源說明（例如：{{"akokay": "你好 / 傳統問候語", "vani": "眼睛 / 傳統詞彙"}}）。絕不可回傳字串。
+3. 喉塞音（glottal stop）一律使用半形撇號 '（U+0027）書寫，例如 ma'ogto；不要改用 ’ ‘ ʼ ʻ ` 等其他符號，也不要自行增減喉塞音。
+4. 遇到達悟語沒有對應詞的現代概念（例如 演算法、網際網路），絕對不要自創達悟語詞彙。一律以華語（國語）的發音音譯，並依達悟語書寫系統的字母書寫（例如 電腦→tennaw、電話→dingwa、國中→kocong、高中→kawcong、國小→kosiaw）。「現代借詞表」已有的詞請直接使用。
+5. 音譯而來的新詞請列在 new_words（鍵為音譯後的達悟語字，值為華語原詞；沒有就回傳空物件 {{}}），並在 etymology 中寫「華語音譯：華語原詞」。
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -1245,6 +1551,9 @@ def process_ai_input(text_prompt=None):
   "ai_reply_zh": "回應之中文翻譯",
   "etymology": {{
      "關鍵單字": "中文翻譯與語源說明"
+  }},
+  "new_words": {{
+     "音譯後的達悟語字": "華語原詞"
   }},
   "is_ai_generated": true,
   "reference": "必須明確列出引用的語料庫ID與出處"
@@ -1278,6 +1587,10 @@ def process_ai_input(text_prompt=None):
             
             if not isinstance(result.get("etymology"), dict):
                 result["etymology"] = {}
+            if not isinstance(result.get("new_words"), dict):
+                result["new_words"] = {}
+            if result["new_words"]:
+                result["is_ai_generated"] = True  # 有音譯新詞，一定是 AI 生成
 
             return result
         except ResourceExhausted:
@@ -1408,12 +1721,13 @@ if main_menu == "miAI ko / 我要用AI":
                     ai_data = process_ai_input(text_prompt=text_input)
                     if ai_data:
                         st.session_state.active_q = text_input
+                        ai_data = canonicalize_ai_data(ai_data)
                         ai_data["sentence_id"] = uuid.uuid4().hex  # 這一句回應的暫時識別
 
                         # 依「這位使用者自己」的打字與投票習慣，把回應中的字換成他慣用的拼法
-                        prefs = get_spelling_prefs(st.session_state.user_info["username"], text_input)
+                        policy = get_variant_policy(st.session_state.user_info, text_input)
                         ai_data["ai_reply_tao_raw"] = ai_data.get("ai_reply_tao", "")  # 個人化之前的原始輸出
-                        ai_data["ai_reply_tao"], swaps = apply_spelling_prefs(ai_data.get("ai_reply_tao", ""), prefs)
+                        ai_data["ai_reply_tao"], swaps = apply_variant_policy(ai_data.get("ai_reply_tao", ""), policy)
                         if swaps:
                             ety = ai_data.get("etymology") if isinstance(ai_data.get("etymology"), dict) else {}
                             for old, new in swaps.items():
@@ -1467,7 +1781,7 @@ if main_menu == "miAI ko / 我要用AI":
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
             if ai_data.get("spelling_swaps"):
-                st.caption("已依您的慣用拼法調整：" + "、".join(f"{o} → {n}" for o, n in ai_data["spelling_swaps"].items()))
+                st.caption("已調整拼法（依您的慣用或一般用法）：" + "、".join(f"{o} → {n}" for o, n in ai_data["spelling_swaps"].items()))
             _notes_reply = spellcheck_notes(ai_data.get("ai_reply_tao", ""))
             if _notes_reply:
                 st.caption("🔎 拼寫檢查：" + "；".join(_notes_reply))
@@ -1505,6 +1819,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_error=False,
                         pending_sentence_id=ai_data.get("sentence_id"),
                     ):
+                        register_new_words(ai_data, ai_data.get("ai_reply_tao"), st.session_state.user_info["username"])
                         st.success("🎉 已成功儲存！")
                         del st.session_state.ai_data
                         st.rerun()
@@ -1537,6 +1852,7 @@ if main_menu == "miAI ko / 我要用AI":
                             lower_first_char(e_q_tao), e_q_trans, lower_first_char(e_r_tao), e_r_zh,
                         ),
                     ):
+                        register_new_words(ai_data, lower_first_char(e_r_tao), st.session_state.user_info["username"])
                         st.success("🎉 已成功更新修正版")
                         del st.session_state.ai_data
                         st.rerun()
@@ -1549,10 +1865,12 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
     with st.expander("🧪 語料庫檢索狀態（檢查標註是否正確）"):
         try:
             _raw = load_all_raw_corpus()
-            _official = [it for it in _raw if not it.get("is_feedback")]
+            _pending = [it for it in _raw if is_unverified(it)]
+            _official = [it for it in _raw if not it.get("is_feedback") and not is_unverified(it)]
             _widx = build_word_index()
             st.markdown(
-                f"- 官方語料：**{len(_official)}** 句；已驗證併入的社群語料：**{len(_raw) - len(_official)}** 句\n"
+                f"- 官方語料：**{len(_official)}** 筆；已驗證併入的社群語料：**{len(_raw) - len(_official) - len(_pending)}** 筆；"
+                f"待審的 AI 生成例句：**{len(_pending)}** 筆（不計入用例與比對）\n"
                 f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次才是一般單字，其餘會標示螢光"
             )
             if not _official:
@@ -1600,6 +1918,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             load_vote_data.clear()
             load_word_notes.clear()
             _spell_resources.clear()
+            load_variant_stats.clear()
             spell_check_word.clear()
             st.rerun()
 
@@ -1618,6 +1937,10 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 key="fb_search_word",
                 placeholder="例如：akokay",
             )
+            ignore_glottal = st.checkbox(
+                "忽略喉塞音符號（'）：ma'ogto 與 maogto 視為同一個字", value=True, key="fb_search_glottal"
+            )
+            key = (lambda s: s.replace("'", "")) if ignore_glottal else (lambda s: s)
             query = normalize_word(search_raw.split()[0]) if search_raw.strip() else ""
             shown = feedbacks
 
@@ -1627,12 +1950,12 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 site_count = build_word_index().get(query, {}).get("count", 0)
 
                 tok_sets = {
-                    fb["id"]: {normalize_word(t) for t in f"{fb.get('q_original') or ''} {fb.get('tao_text') or ''}".split()}
+                    fb["id"]: {key(normalize_word(t)) for t in f"{fb.get('q_original') or ''} {fb.get('tao_text') or ''}".split()}
                     for fb in feedbacks
                 }
                 root = vd["group_of"].get(query)
                 variants = [m for m in vd["members"].get(root, []) if m != query]
-                counts = {m: sum(1 for ts in tok_sets.values() if m in ts) for m in [query] + variants}
+                counts = {m: sum(1 for ts in tok_sets.values() if key(m) in ts) for m in [query] + variants}
 
                 st.markdown(
                     f"**「{query}」** 共有 **{counts[query]}** 筆社群例句"
@@ -1643,20 +1966,20 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 if variants:
                     lines = []
                     for m in variants:
-                        desc_m = (notes.get(m) or {}).get("description")
+                        desc_m = (notes.get(m) or {}).get("description") or "；".join(build_word_index().get(m, {}).get("glosses", []))
                         lines.append(f"- **{m}**{f'〔{desc_m}〕' if desc_m else ''}：{counts[m]} 筆")
                     st.markdown("🔀 **有異體字**\n" + "\n".join(lines))
                     include_variants = st.checkbox("同時顯示異體字的用例", value=True, key="fb_search_variants")
                 else:
                     st.caption("目前沒有異體字（尚無人提出，或提出的字未通過異體字判定）。")
 
-                forms = {query, *variants} if include_variants else {query}
+                forms = {key(x) for x in ({query, *variants} if include_variants else {query})}
                 shown = [fb for fb in feedbacks if tok_sets[fb["id"]] & forms]
 
-                official = [it for it in load_all_raw_corpus() if not it.get("is_feedback")]
+                official = [it for it in load_all_raw_corpus() if not it.get("is_feedback") and not is_unverified(it)]
                 corpus_hits = [
                     it for it in official
-                    if forms & {normalize_word(t) for t in (it.get("tao") or "").split()}
+                    if forms & {key(normalize_word(t)) for t in (it.get("tao") or "").split()}
                 ]
                 st.markdown(f"📚 官方語料庫：**{len(corpus_hits)}** 筆句子")
                 if corpus_hits:
