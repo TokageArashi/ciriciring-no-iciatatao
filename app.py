@@ -180,27 +180,7 @@ def login_user(username, password):
 
 
 # --- 3. Supabase 讀寫函式 ---
-# --- 修改紀錄：保存「AI 原句 → 使用者修正句」 ---
-# 需要在 Supabase 建立資料表（只新增、不修改）：
-#   create table public.sentence_edits (
-#     id bigint generated always as identity primary key,
-#     feedback_id bigint,
-#     user_id text,
-#     source text,                       -- 'ai'（AI 生成）或 'algorithm'（語料比對）
-#     original_q_tao text, original_q_zh text,
-#     original_a_tao text, original_a_zh text,
-#     raw_a_tao text,                    -- 套用個人慣用拼法之前、模型的原始輸出
-#     edited_q_tao text, edited_q_zh text,
-#     edited_a_tao text, edited_a_zh text,
-#     diff_json jsonb,                   -- 逐詞（單詞替換時含逐字母）的差異
-#     created_at timestamptz default now()
-#   );
-#   alter table public.sentence_edits enable row level security;
-#   create policy "sentence_edits select" on public.sentence_edits for select using (true);
-#   create policy "sentence_edits insert" on public.sentence_edits for insert with check (true);
-#   notify pgrst, 'reload schema';
 def word_diff(old, new):
-    """逐詞比對兩個句子；單詞對單詞的替換另外記錄逐字母差異（之後可用來分析詞綴與拼法）。"""
     a, b = (old or "").split(), (new or "").split()
     sm = difflib.SequenceMatcher(None, [x.lower() for x in a], [x.lower() for x in b], autojunk=False)
     ops = []
@@ -220,7 +200,6 @@ def word_diff(old, new):
 
 
 def build_edit_record(ai_data, q_fallback, e_q_tao, e_q_zh, e_a_tao, e_a_zh):
-    """組出要寫入 sentence_edits 的內容；四個欄位都沒有被改動時回傳 None。"""
     o_q_tao = ai_data.get("user_recognized_tao", q_fallback) or ""
     o_q_zh = ai_data.get("user_translation") or ""
     o_a_tao = ai_data.get("ai_reply_tao") or ""
@@ -277,7 +256,6 @@ def save_語料_to_supabase(
         build_word_index.clear()
         load_user_typed_words.clear()
 
-        # 使用者修改過 AI 的句子：把「修改前的原句」與逐詞差異另存一筆（失敗不影響句子本身的儲存）
         if edit_record and is_edited and res_ins.data:
             try:
                 supabase.from_("sentence_edits").insert(
@@ -286,8 +264,6 @@ def save_語料_to_supabase(
             except Exception as edit_err:
                 st.toast(f"修改前的原句未能保存（請建立 sentence_edits 資料表）：{edit_err}", icon="⚠️")
 
-        # 使用者若在「尚未儲存」的回應句上投過票，句子存檔（且未修改）後，
-        # 把那些票改掛到新例句的 id，這樣同一句不會在例句頁被重複投票。
         if pending_sentence_id and not is_edited and res_ins.data:
             try:
                 new_id = res_ins.data[0].get("id")
@@ -320,8 +296,6 @@ def delete_feedback_item(feedback_id, current_username):
         if current_username != "admin" and owner_id != current_username:
             return False, "權限不足：您只能刪除自己提供的資料！"
 
-        # 只刪例句本身：該句產生的投票（community_votes）刻意保留，
-        # 用例數則因為例句消失而自動扣除（見 build_word_index）。
         supabase.from_("feedback").delete().eq("id", feedback_id).execute()
         build_word_index.clear()
         load_all_raw_corpus.clear()
@@ -332,17 +306,15 @@ def delete_feedback_item(feedback_id, current_username):
 
 CORPUS_TAO_COLS = ("tao_text", "tao", "yami_text", "yami")
 CORPUS_ZH_COLS = ("zh_text", "zh", "chinese", "zh_tw", "translation")
-WORDLIST_SOURCE = "單字表匯入"  # import_words.sql 寫入 corpus 的詞條來源（單字／片語，不是句子）
-UNVERIFIED_PREFIX = "AI生成（待審）"  # import_generated_examples.sql 寫入的來源前綴：尚未經母語者確認
+WORDLIST_SOURCE = "單字表匯入"
+UNVERIFIED_PREFIX = "AI生成（待審）"
 
 
 def is_unverified(item):
-    """待審的 AI 生成句：不算進用例、不參與比對，也不當作提示詞的參考。"""
     return str(item.get("source") or "").startswith(UNVERIFIED_PREFIX)
 
 
 def is_sentence_item(item):
-    """整句比對與句子參考只用已驗證的「句子」：排除單字表詞條、只有一個詞的條目、待審的 AI 生成句。"""
     return (
         item.get("source") != WORDLIST_SOURCE
         and not is_unverified(item)
@@ -351,7 +323,6 @@ def is_sentence_item(item):
 
 
 def _first_col(row, names):
-    """依序找第一個有內容的欄位；欄位不存在或為 null 時回傳空字串。"""
     for n in names:
         v = row.get(n)
         if v:
@@ -360,7 +331,6 @@ def _first_col(row, names):
 
 
 def diagnose_corpus_table():
-    """直接查 corpus 資料表，回報錯誤、可讀到的筆數與實際欄位名稱。"""
     info = {"error": None, "count": None, "columns": [], "sample": []}
     try:
         res = supabase.from_("corpus").select("*", count="exact").limit(3).execute()
@@ -375,10 +345,6 @@ def diagnose_corpus_table():
 
 
 def fetch_all_rows(table, columns="*", order=None, eq=None, page=1000):
-    """
-    Supabase 單次查詢預設最多只回傳 1000 筆；這裡分頁讀完整張表。
-    order: [(欄位, 是否遞減), ...]；排序欄位不存在時自動退回不排序。
-    """
     rows, start = [], 0
     while True:
         q = supabase.from_(table).select(columns)
@@ -449,7 +415,6 @@ def _load_all_raw_corpus_cached():
 
 
 def load_all_raw_corpus():
-    """有快取的語料載入；但空結果（讀取失敗、權限尚未修好等）不保留，下次立刻重讀。"""
     items = _load_all_raw_corpus_cached()
     if not items:
         _load_all_raw_corpus_cached.clear()
@@ -477,15 +442,12 @@ def search_relevant_corpus(user_input, top_k=3):
             score = 0
             item_words = [normalize_word(t) for t in item["tao"].split()]
             item_set = {t for t in item_words if t}
-            item_plain = {t.replace("'", "") for t in item_set}
             if clean_input in item["full_text"] or (phrase and phrase in " ".join(item_words)):
                 score += 100
 
             for kw in user_set:
                 if kw in item_set:
                     score += 10
-                elif kw.replace("'", "") in item_plain:
-                    score += 7  # 只差喉塞音符號
 
             if score > 0:
                 scored_items.append((score, item))
@@ -524,9 +486,6 @@ def algorithm_first_processing(user_text):
                 "is_algorithm": True,
             }
 
-    # 以「單字」為單位比對（不再用子字串，避免 a、asa 這類短字誤中大量句子）：
-    # 至少 2 個字相同，且輸入的字有 80% 以上出現在該句（4 個字以內須全部出現）、兩邊字集的重疊度（Jaccard）至少 75%；
-    # 只差一個名詞的句子（例如 asa ka ino 與 asa ka kois）不會被當成同一句
     user_tokens = {normalize_word(t) for t in user_text.split()} - {""}
     best_item = None
     best_key = (0, 0.0)
@@ -556,28 +515,23 @@ def algorithm_first_processing(user_text):
 
 
 # --- 5. 單字用例統計、螢光標註與投票 ---
-HIGHLIGHT_THRESHOLD = 10  # 用例 <= 10 → 黃色；> 10 → 一般單字不標示
+HIGHLIGHT_THRESHOLD = 10
 WORD_STRIP_CHARS = ".,!?;:\"“”()[]「」『』。，！？；：、…—–"
 
-
-# 喉塞音在文字中常被寫成各種撇號或相近符號；全站一律當作半形 ' 處理
 APOSTROPHE_CHARS = "’‘ʼʻ´`′ʹʔ"
 _APOS_TABLE = str.maketrans({c: "'" for c in APOSTROPHE_CHARS})
 
 
 def canon_apostrophes(text):
-    """把 ’ ‘ ʼ ʻ ´ ` ′ ʹ ʔ 統一換成半形撇號 '（U+0027）。"""
     return (text or "").translate(_APOS_TABLE)
 
 
 def normalize_word(token):
-    """全站統一的單字識別：Unicode 正規化(NFC)、統一喉塞音符號、去除頭尾標點並轉小寫。"""
     t = canon_apostrophes(unicodedata.normalize("NFC", token or ""))
     return t.strip(WORD_STRIP_CHARS).lower()
 
 
 def split_token(token):
-    """把 'akokay,' 拆成 (前標點, 單字, 後標點)。"""
     esc = re.escape(WORD_STRIP_CHARS)
     m = re.match(rf"^([{esc}]*)(.*?)([{esc}]*)$", token)
     return m.group(1), m.group(2), m.group(3)
@@ -585,11 +539,6 @@ def split_token(token):
 
 @st.cache_data(ttl=300)
 def _build_word_index_cached():
-    """
-    單字 -> {'count': 本站總出現次數, 'corpus': 官方語料次數, 'community': 社群例句次數, 'zh': 一則例句翻譯, 'glosses': 單字表釋義}。
-    社群例句 = feedback 表中所有已儲存的例句（使用者輸入 q_original 與回應 tao_text）。
-    同一句用到兩次就算兩次；例句被刪除後，下次重算時自然扣掉。
-    """
     index = {}
 
     def add(text, zh, source, wordlist=False):
@@ -601,15 +550,13 @@ def _build_word_index_cached():
             entry = index.setdefault(w, {"count": 0, "corpus": 0, "community": 0, "zh": zh, "glosses": []})
             entry["count"] += 1
             entry[source] += 1
-            # 單字表的單字詞條：釋義記到這個字上（一字多義會累積多筆）
             if wordlist and len(toks) == 1 and zh and zh not in entry["glosses"]:
                 entry["glosses"].append(zh)
 
-    # 官方語料；已驗證而併入語料的 feedback 略過，改由下面的 feedback 全量計算，避免重複
     for item in load_all_raw_corpus():
         if not item.get("is_feedback"):
             if not is_unverified(item):
-                add(item["tao"], item["zh"], "corpus", wordlist=True)  # 只有一個詞的條目會記為該字的釋義
+                add(item["tao"], item["zh"], "corpus", wordlist=True)
 
     try:
         for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text"):
@@ -632,25 +579,12 @@ build_word_index.clear = _build_word_index_cached.clear
 
 
 # --- 5.5 單字描述校正與異體字判定 ---
-# 需要在 Supabase 建立資料表（只新增、不覆蓋，保留修改紀錄；同一個字以最新一筆為準）：
-#   create table word_notes (
-#     id          bigint generated always as identity primary key,
-#     word        text not null,
-#     description text not null,
-#     editor      text,
-#     created_at  timestamptz default now(),
-#     tag         text                       -- 'loanword' = 現代借詞（華語音譯）
-#   );
-#   create index on word_notes (word);
-# 已建立過資料表的話，補上欄位：  alter table public.word_notes add column if not exists tag text;
-# （若資料表有啟用 RLS，需比照 community_votes 加上 select / insert policy）
 LOANWORD_TAG = "loanword"
 REL_SPELLING = "拼法不同（同一個字的不同寫法）"
 REL_TRANSLATION = "譯詞相同（不同的字，意思完全一樣）"
 
 
 def _desc_norm(s):
-    """比較描述用：去掉空白與標點、轉小寫。"""
     return re.sub(r"[\s\u3000,.;:!?，。；：！？、/／()（）「」『』\"'“”]+", "", (s or "").lower())
 
 
@@ -665,7 +599,6 @@ def _edit_distance(a, b):
 
 
 def spelling_similar(a, b):
-    """明顯只是拼法不同：長度至少 3，且編輯距離不超過 max(1, 長度//4)。"""
     if not a or not b or a == b:
         return False
     longer = max(len(a), len(b))
@@ -674,12 +607,11 @@ def spelling_similar(a, b):
 
 @st.cache_data(ttl=60)
 def load_word_notes():
-    """單字 -> {'description', 'editor', 'created_at'}；使用者校正過的描述，同一字以最新一筆為準。"""
     notes = {}
     try:
         rows = fetch_all_rows("word_notes", "word, description, editor, created_at, tag", order=[("id", False)])
     except Exception:
-        try:  # 尚未新增 tag 欄位時，退回舊的讀法
+        try:
             rows = fetch_all_rows("word_notes", "word, description, editor, created_at", order=[("id", False)])
         except Exception:
             return notes
@@ -692,27 +624,20 @@ def load_word_notes():
 
 
 def is_loanword(word, notes):
-    """是否被標為現代借詞（華語音譯）。"""
     return (notes.get(word) or {}).get("tag") == LOANWORD_TAG
 
 
 def save_word_note(word, description, editor, tag=None):
     row = {"word": word, "description": description.strip(), "editor": editor}
-    if tag:                       # 沒有標籤時不寫入該欄，等於清除標籤（最新一筆為準）
+    if tag:
         row["tag"] = tag
     supabase.from_("word_notes").insert(row).execute()
     load_word_notes.clear()
-    load_vote_data.clear()  # 異體字是否成立取決於描述，所以一併重算
+    load_vote_data.clear()
     load_variant_stats.clear()
 
 
 def link_is_valid(a, b, rel, notes):
-    """
-    兩個字能不能算異體字（每次讀取時重新判斷，描述被改掉後關係會自動解除）：
-      spelling    ：拼法明顯相近，且沒有「兩邊描述都有、卻不同」的反證
-      translation ：兩邊都有描述，且描述相同（譯詞相同）
-    意思只是相近、描述不同的字不會成立。
-    """
     da = (notes.get(a) or {}).get("description")
     db = (notes.get(b) or {}).get("description")
     if rel == "spelling":
@@ -725,7 +650,6 @@ def link_is_valid(a, b, rel, notes):
 
 
 def check_variant_proposal(word, alt, rel, shared_desc, notes):
-    """檢查提出的異體字。回傳 (是否通過, 錯誤訊息, 需要補存的描述 {字: 描述})。"""
     da = (notes.get(word) or {}).get("description")
     db = (notes.get(alt) or {}).get("description")
 
@@ -757,7 +681,6 @@ def check_variant_proposal(word, alt, rel, shared_desc, notes):
 
 
 def build_dictionary_context(text, limit=40):
-    """從使用者輸入中找出單字表有收錄的字，整理成給模型的詞典參考。"""
     idx = build_word_index()
     lines, seen = [], set()
     for tok in (text or "").split():
@@ -772,7 +695,6 @@ def build_dictionary_context(text, limit=40):
 
 
 def build_loanword_context(limit=80):
-    """社群已採用的現代借詞（華語音譯）：每個異體字群組只列用例最多的一個。"""
     notes, idx = load_word_notes(), build_word_index()
     group_of = load_vote_data()["group_of"]
     best = {}
@@ -789,10 +711,6 @@ def build_loanword_context(limit=80):
 
 
 def register_new_words(ai_data, final_tao, username):
-    """
-    使用者採納（儲存）含有 AI 音譯新詞的句子時，把「華語原詞」記成該詞的描述並標為現代借詞，
-    之後其他人的對話也會使用這個詞。已有描述的字不覆蓋。
-    """
     new_words = ai_data.get("new_words") if isinstance(ai_data, dict) else None
     if not isinstance(new_words, dict) or not new_words:
         return
@@ -809,7 +727,6 @@ def register_new_words(ai_data, final_tao, username):
 
 
 def build_notes_context(*texts, limit=30):
-    """從文字中找出有被使用者校正過描述的字，整理成給模型的參考。"""
     notes = load_word_notes()
     if not notes:
         return ""
@@ -823,9 +740,9 @@ def build_notes_context(*texts, limit=30):
     return "\n".join(lines[:limit])
 
 
-# --- 拼寫與寫法檢查（由官方語料自動推得，不寫死任何拼寫規則） ---
-SPELL_MIN_LEN = 4              # 太短的字不做相似字建議（誤報太多）
-SPELL_MIN_CANDIDATE_COUNT = 3  # 建議的字在官方語料中至少要出現這麼多次
+# --- 拼寫與寫法檢查 ---
+SPELL_MIN_LEN = 4
+SPELL_MIN_CANDIDATE_COUNT = 3
 
 
 def _deletions(w, max_d):
@@ -839,7 +756,6 @@ def _deletions(w, max_d):
 
 @st.cache_resource(ttl=300)
 def _spell_resources():
-    """官方語料的詞表、刪除一到兩個字母的索引（快速找相近字），以及各字母出現在幾個不同單字中。"""
     idx = build_word_index()
     deletes, chars, n_types, plain = {}, {}, 0, {}
     for w, e in idx.items():
@@ -859,16 +775,11 @@ def _spell_resources():
 
 @st.cache_data(ttl=300)
 def spell_check_word(word):
-    """
-    回傳 {'suggestions': [(相近的已知字, 差幾個字母, 官方語料次數)], 'odd_chars': [罕見字母]}。
-    相近字須在官方語料中的次數 >= max(3, 3 × 這個字本身的總用例)，避免把正常的罕用字誤判成拼錯。
-    """
     out = {"suggestions": [], "odd_chars": [], "glottal": []}
     res = _spell_resources()
     if not res["chars"] or not word:
         return out
 
-    # 只差喉塞音符號（'）的已知字：不論用例多寡都提醒（使用者可能省略或多寫了喉塞音）
     out["glottal"] = sorted(
         ((c, res["idx"][c]["corpus"]) for c in res["plain"].get(word.replace("'", ""), set()) if c != word),
         key=lambda x: -x[1],
@@ -899,7 +810,6 @@ def spell_check_word(word):
 
 
 def spellcheck_notes(sentence, limit=5):
-    """整句的拼寫提醒：只檢查會被標螢光的字（用例 10 次以內）。"""
     idx = _spell_resources()["idx"]
     notes, seen = [], set()
     for tok in (sentence or "").split():
@@ -920,11 +830,6 @@ def spellcheck_notes(sentence, limit=5):
 
 
 def _parse_vote(v):
-    """
-    把一筆 community_votes 解析成 (被投票的單字, 投給的拼法, 異體關係)。
-    新格式: word_key:apia | pick:apiya | rel:spelling（或 rel:translation；投給既有拼法時沒有 rel）
-    舊格式: word_key:apia | 替代詞: apiya  /  word_key:apia | 贊同  /  word_key:apia | 不贊同
-    """
     sug = str(v.get("hidden_suggestion", "") or "").lower()
     m = re.search(r"word_key:(.+?)\s*(?:\||$)", sug) or re.search(r"\[(.+?)\]", sug)
     if not m:
@@ -941,19 +846,13 @@ def _parse_vote(v):
     elif v.get("vote_result") == "贊同":
         pick = word
     else:
-        pick = None  # 舊資料：不贊同但沒有提出替代拼法
+        pick = None
     rl = re.search(r"rel:(spelling|translation)", sug)
     return word, (pick or None), (rl.group(1) if rl else None)
 
 
 @st.cache_data(ttl=30)
 def load_vote_data():
-    """
-    tally      {拼法: 被選次數}
-    group_of   {單字: 群組代表字}      只有「被提出過替代拼法」的單字才有群組
-    members    {群組代表字: [同組拼法]}
-    user_picks {帳號: {群組代表字: {拼法: 次數}}}
-    """
     empty = {"tally": {}, "group_of": {}, "members": {}, "user_picks": {}, "pick_rows": []}
     try:
         vote_rows = fetch_all_rows("community_votes", "voter_id, vote_result, hidden_suggestion, region, age_group, gender", order=[("id", False)])
@@ -979,14 +878,12 @@ def load_vote_data():
         find(word)
         if pick:
             tally[pick] = tally.get(pick, 0) + 1
-            # 只有「拼法不同」或「譯詞（描述）相同」且通過驗證的才算異體字；舊資料沒有 rel，不成組
             if pick != word and rel and link_is_valid(word, pick, rel, notes):
                 ra, rb = find(word), find(pick)
                 if ra != rb:
                     parent[rb] = ra
         rows.append((v.get("voter_id"), pick, v.get("region"), v.get("age_group"), v.get("gender")))
 
-    # 人工整理的異體字連結（例如單字表匯入）：不需要再驗證，一律成立；資料表尚未建立時略過
     try:
         for r in fetch_all_rows("word_variants", "word_a, word_b"):
             a, b = normalize_word(r.get("word_a")), normalize_word(r.get("word_b"))
@@ -1017,7 +914,6 @@ def load_vote_data():
 
 
 def sentence_key(fb_id, sentence_id):
-    """例句的唯一識別：已儲存 -> feedback id；尚未儲存的回應句 -> 這次生成的暫時 id。"""
     if fb_id:
         return f"fb:{fb_id}"
     if sentence_id:
@@ -1026,7 +922,6 @@ def sentence_key(fb_id, sentence_id):
 
 
 def _fetch_user_votes(voter_id):
-    """直接查 Supabase：回傳這個帳號已投過的 {(例句識別, 單字)}。查詢失敗會丟出例外。"""
     rows = fetch_all_rows("community_votes", "feedback_id, hidden_suggestion", eq={"voter_id": voter_id})
     keys = set()
     for v in rows:
@@ -1047,7 +942,6 @@ def _fetch_user_votes(voter_id):
 
 @st.cache_data(ttl=30)
 def load_user_votes(voter_id):
-    """顯示用（有短暫快取）；真正送出投票時會改用 _fetch_user_votes 重查。"""
     try:
         return _fetch_user_votes(voter_id)
     except Exception:
@@ -1056,7 +950,6 @@ def load_user_votes(voter_id):
 
 @st.cache_data(ttl=60)
 def load_user_typed_words(username):
-    """此帳號自己打過的字：已儲存的輸入句，以及自己修改過的回應句。AI 原樣回應的句子不算。"""
     words = []
     try:
         rows = fetch_all_rows("feedback", "q_original, tao_text, is_edited", eq={"user_id": username})
@@ -1072,7 +965,6 @@ def load_user_typed_words(username):
 
 
 def canonicalize_ai_data(ai_data):
-    """AI（或語料）回傳的句子與 etymology 鍵，喉塞音符號一律統一成半形 '。"""
     if not isinstance(ai_data, dict):
         return ai_data
     for k in ("user_recognized_tao", "ai_reply_tao"):
@@ -1085,10 +977,6 @@ def canonicalize_ai_data(ai_data):
 
 
 def get_personal_choice(username, current_text=""):
-    """
-    {群組代表字: 這個帳號慣用的拼法}。只看這個帳號自己的打字（含這次輸入）與自己的投票選擇，
-    不受其他使用者影響；各拼法分數相同（沒有明顯傾向）的群組不列出。
-    """
     if not username:
         return {}
     vd = load_vote_data()
@@ -1120,7 +1008,6 @@ def get_personal_choice(username, current_text=""):
 
 
 def get_spelling_prefs(username, current_text=""):
-    """{單字: 這個帳號慣用的拼法}（只列出該被換掉的字）。"""
     vd = load_vote_data()
     prefs = {}
     for root, best in get_personal_choice(username, current_text).items():
@@ -1137,10 +1024,6 @@ def _region_list(value):
 
 @st.cache_data(ttl=60)
 def load_variant_stats():
-    """
-    異體字群組中的每個拼法：被幾個不同帳號使用過，以及在各部落／年齡層／性別的使用次數。
-    來源：使用者自己打的句子（輸入句與自己修改過的回應句）與投票時選的拼法；AI 原樣回應的句子不算。
-    """
     vd = load_vote_data()
     group_of = vd["group_of"]
     stats, accounts = {}, {}
@@ -1176,12 +1059,6 @@ def load_variant_stats():
 
 
 def variant_eligible(word, idx, stats, notes):
-    """
-    這個拼法能不能用在「和其他帳號的對話」：
-      · 現代借詞（華語音譯）：即使只有一個帳號、一個用例也可以；
-      · 官方語料或單字表已收錄：可以；
-      · 其餘：至少要有 2 個不同帳號使用過（只有一個帳號用的拼法，用例再多也不對其他人使用）。
-    """
     if is_loanword(word, notes):
         return True
     if idx.get(word, {}).get("corpus", 0) > 0:
@@ -1190,11 +1067,6 @@ def variant_eligible(word, idx, stats, notes):
 
 
 def choose_default_variants(user_info, skip_roots=()):
-    """
-    個人沒有明顯傾向時，各異體字群組的預設用法：{群組代表字: {'pool': 可用拼法, 'preferred': 要換成的拼法}}。
-    可用拼法 ＝ 可對外使用的拼法中「用例前三多」，加上「該帳號的部落、年齡層、性別最常使用」的拼法；
-    句中的字不在這個範圍時，換成偏好的拼法（部落 > 年齡層 > 性別 > 用例最多）。
-    """
     user_info = user_info or {}
     vd = load_vote_data()
     if not vd["members"]:
@@ -1227,13 +1099,11 @@ def choose_default_variants(user_info, skip_roots=()):
 
 
 def get_variant_policy(user_info, current_text=""):
-    """個人慣用優先；沒有明顯傾向的群組，改用一般用法。"""
     personal = get_personal_choice((user_info or {}).get("username"), current_text)
     return {"personal": personal, "defaults": choose_default_variants(user_info, skip_roots=set(personal))}
 
 
 def apply_variant_policy(text, policy):
-    """依 policy 調整句子中的異體字；回傳 (新句子, {原字: 新字})。"""
     if not text or not policy:
         return text, {}
     group_of = load_vote_data()["group_of"]
@@ -1257,7 +1127,6 @@ def apply_variant_policy(text, policy):
 
 
 def apply_spelling_prefs(text, prefs):
-    """把句子裡的單字換成慣用拼法；回傳 (新句子, {原字: 新字})。"""
     if not text or not prefs:
         return text, {}
     out, swaps = [], {}
@@ -1274,15 +1143,14 @@ def apply_spelling_prefs(text, prefs):
 
 
 def classify_word(count, in_user_input, is_ai_generated, user_accepted):
-    """回傳 None（一般單字）、'yellow'、'red'。"""
     if count > HIGHLIGHT_THRESHOLD:
         return None
     if count == 0:
         if in_user_input:
-            return "yellow"  # 使用者輸入、語料庫沒有
+            return "yellow"
         if is_ai_generated and not user_accepted:
-            return "red"  # AI 自創
-    return "yellow"  # 用例不超過 10 例 / 已被採納的自創字
+            return "red"
+    return "yellow"
 
 
 def _plain(text, css_class="tao-w"):
@@ -1301,7 +1169,6 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
     skey = sentence_key(fb_id, sentence_id)
     my_votes = load_user_votes(current_user) if (enable_word_voting and current_user) else set()
 
-    # 這個 container 會被 CSS 排成「一行、自動換行」的句子（見頁首 CSS）
     with st.container(key=f"sent_{key_prefix}"):
         for idx, token in enumerate((sentence or "").split()):
             lead, w, trail = split_token(token)
@@ -1315,11 +1182,11 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                 level = classify_word(occ_count, clean_w in user_words, is_ai_generated, user_accepted)
 
                 if level is None:
-                    _plain(w)  # 一般單字：不標示、不可點擊
+                    _plain(w)
                 else:
                     etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
                     example_zh = info.get("zh")
-                    note = notes.get(clean_w)  # 使用者校正過的描述，優先於 AI / 例句的解釋
+                    note = notes.get(clean_w)
                     gloss = "；".join(info.get("glosses", []))
                     if note:
                         zh_meaning = note["description"]
@@ -1336,7 +1203,6 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         category_title = f"🟡 低用例詞彙（官方語料有 {corpus_n} 次，用例 10 次以內）"
                     tag = "hlR" if level == "red" else "hlY"
 
-                    # 同一個詞的異體字（通過驗證才會成組）與各自票數
                     group_root = vote_data["group_of"].get(clean_w)
                     others = [m for m in vote_data["members"].get(group_root, []) if m != clean_w]
                     usage = {m: word_index.get(m, {}).get("count", 0) for m in [clean_w] + others}
@@ -1439,7 +1305,6 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
                             if st.button("送出投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
                                 try:
-                                    # 送出前重新查一次，確保「同帳號、同例句、同單字」只有一票
                                     load_user_votes.clear()
                                     if skey and (skey, clean_w) in _fetch_user_votes(current_user):
                                         raise ValueError(f"您已對本句的「{w}」投過票，無法重複投票。")
@@ -1468,7 +1333,6 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                                     voter_region = voter_info.get("region", "未知")
                                     voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
 
-                                    # 尚未儲存的回應句用 sent:<暫時id> 標記是哪一句
                                     sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
                                     suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
 
@@ -1566,7 +1430,7 @@ def process_ai_input(text_prompt=None):
     else:
         return None
 
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             response = model.generate_content(
@@ -1590,13 +1454,12 @@ def process_ai_input(text_prompt=None):
             if not isinstance(result.get("new_words"), dict):
                 result["new_words"] = {}
             if result["new_words"]:
-                result["is_ai_generated"] = True  # 有音譯新詞，一定是 AI 生成
+                result["is_ai_generated"] = True
 
             return result
         except ResourceExhausted:
             if attempt < max_retries - 1:
-                wait_time = 5 * (2 ** attempt)
-                time.sleep(wait_time)
+                time.sleep(2)
             else:
                 st.error("❌ 請求超出 API 配額限制，請稍候再試。")
                 return None
@@ -1722,11 +1585,10 @@ if main_menu == "miAI ko / 我要用AI":
                     if ai_data:
                         st.session_state.active_q = text_input
                         ai_data = canonicalize_ai_data(ai_data)
-                        ai_data["sentence_id"] = uuid.uuid4().hex  # 這一句回應的暫時識別
+                        ai_data["sentence_id"] = uuid.uuid4().hex
 
-                        # 依「這位使用者自己」的打字與投票習慣，把回應中的字換成他慣用的拼法
                         policy = get_variant_policy(st.session_state.user_info, text_input)
-                        ai_data["ai_reply_tao_raw"] = ai_data.get("ai_reply_tao", "")  # 個人化之前的原始輸出
+                        ai_data["ai_reply_tao_raw"] = ai_data.get("ai_reply_tao", "")
                         ai_data["ai_reply_tao"], swaps = apply_variant_policy(ai_data.get("ai_reply_tao", ""), policy)
                         if swaps:
                             ety = ai_data.get("etymology") if isinstance(ai_data.get("etymology"), dict) else {}
@@ -1758,7 +1620,7 @@ if main_menu == "miAI ko / 我要用AI":
                     user_accepted=True,
                     etymology_map=ai_data.get("etymology", {}),
                     key_prefix="main_user",
-                    enable_word_voting=False,  # 自己輸入的句子只看說明與票數，投票在回應句進行
+                    enable_word_voting=False,
                     current_user=st.session_state.user_info["username"],
                     user_input_text=user_sentence,
                 )
@@ -1808,18 +1670,20 @@ if main_menu == "miAI ko / 我要用AI":
 
             if "apiya" in eval_choice:
                 if st.button("voka ✅ 直接送出儲存至 Supabase"):
+                    final_q_tao = canon_apostrophes((ai_data.get("user_recognized_tao") or q_orig).strip())
+                    final_r_tao = canon_apostrophes((ai_data.get("ai_reply_tao") or "").strip())
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
-                        ai_data.get("user_recognized_tao", q_orig),
+                        final_q_tao,
                         ai_data.get("user_translation"),
-                        ai_data.get("ai_reply_tao"),
+                        final_r_tao,
                         ai_data.get("ai_reply_zh"),
                         is_edited=False,
                         is_error=False,
                         pending_sentence_id=ai_data.get("sentence_id"),
                     ):
-                        register_new_words(ai_data, ai_data.get("ai_reply_tao"), st.session_state.user_info["username"])
+                        register_new_words(ai_data, final_r_tao, st.session_state.user_info["username"])
                         st.success("🎉 已成功儲存！")
                         del st.session_state.ai_data
                         st.rerun()
@@ -1838,21 +1702,24 @@ if main_menu == "miAI ko / 我要用AI":
                 e_r_zh = st.text_input("修改句子 2 翻譯：", value=ai_data.get("ai_reply_zh", ""))
 
                 if st.button("voka 💾 儲存修正版"):
+                    # 保留使用者輸入的大小寫與喉塞音符號（僅統一不同撇號字元為半形 '）
+                    clean_e_q_tao = canon_apostrophes(e_q_tao.strip())
+                    clean_e_r_tao = canon_apostrophes(e_r_tao.strip())
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
-                        lower_first_char(e_q_tao),
+                        clean_e_q_tao,
                         e_q_trans,
-                        lower_first_char(e_r_tao),
+                        clean_e_r_tao,
                         e_r_zh,
                         is_edited=True,
                         is_error=True,
                         edit_record=build_edit_record(
                             ai_data, q_orig,
-                            lower_first_char(e_q_tao), e_q_trans, lower_first_char(e_r_tao), e_r_zh,
+                            clean_e_q_tao, e_q_trans, clean_e_r_tao, e_r_zh,
                         ),
                     ):
-                        register_new_words(ai_data, lower_first_char(e_r_tao), st.session_state.user_info["username"])
+                        register_new_words(ai_data, clean_e_r_tao, st.session_state.user_info["username"])
                         st.success("🎉 已成功更新修正版")
                         del st.session_state.ai_data
                         st.rerun()
@@ -1935,12 +1802,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             search_raw = st.text_input(
                 "輸入單字，查找包含該字的用例（留空則顯示全部）",
                 key="fb_search_word",
-                placeholder="例如：akokay",
+                placeholder="例如：ma'ogto",
             )
-            ignore_glottal = st.checkbox(
-                "忽略喉塞音符號（'）：ma'ogto 與 maogto 視為同一個字", value=True, key="fb_search_glottal"
-            )
-            key = (lambda s: s.replace("'", "")) if ignore_glottal else (lambda s: s)
             query = normalize_word(search_raw.split()[0]) if search_raw.strip() else ""
             shown = feedbacks
 
@@ -1950,12 +1813,12 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 site_count = build_word_index().get(query, {}).get("count", 0)
 
                 tok_sets = {
-                    fb["id"]: {key(normalize_word(t)) for t in f"{fb.get('q_original') or ''} {fb.get('tao_text') or ''}".split()}
+                    fb["id"]: {normalize_word(t) for t in f"{fb.get('q_original') or ''} {fb.get('tao_text') or ''}".split()}
                     for fb in feedbacks
                 }
                 root = vd["group_of"].get(query)
                 variants = [m for m in vd["members"].get(root, []) if m != query]
-                counts = {m: sum(1 for ts in tok_sets.values() if key(m) in ts) for m in [query] + variants}
+                counts = {m: sum(1 for ts in tok_sets.values() if m in ts) for m in [query] + variants}
 
                 st.markdown(
                     f"**「{query}」** 共有 **{counts[query]}** 筆社群例句"
@@ -1973,13 +1836,13 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 else:
                     st.caption("目前沒有異體字（尚無人提出，或提出的字未通過異體字判定）。")
 
-                forms = {key(x) for x in ({query, *variants} if include_variants else {query})}
+                forms = {x for x in ({query, *variants} if include_variants else {query})}
                 shown = [fb for fb in feedbacks if tok_sets[fb["id"]] & forms]
 
                 official = [it for it in load_all_raw_corpus() if not it.get("is_feedback") and not is_unverified(it)]
                 corpus_hits = [
                     it for it in official
-                    if forms & {key(normalize_word(t)) for t in (it.get("tao") or "").split()}
+                    if forms & {normalize_word(t) for t in (it.get("tao") or "").split()}
                 ]
                 st.markdown(f"📚 官方語料庫：**{len(corpus_hits)}** 筆句子")
                 if corpus_hits:
@@ -2008,7 +1871,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             is_ai_generated=False,
                             user_accepted=True,
                             key_prefix=f"fbq_{fb_id}",
-                            enable_word_voting=False,  # 問句只看說明與票數；投票在「答」進行
+                            enable_word_voting=False,
                             current_user=current_user,
                             user_input_text=fb.get('q_original', ''),
                         )
