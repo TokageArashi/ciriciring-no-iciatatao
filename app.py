@@ -33,26 +33,34 @@ def lower_first_char(text: str) -> str:
     return text[0].lower() + text[1:]
 
 
-def detect_input_lang_type(text: str) -> str:
+def detect_input_origin(text: str) -> str:
     """
-    判斷使用者原始輸入的語言類型，供後續研究統計：
-    - 'zh'：中文（含漢字，不含拉丁字母）
-    - 'tao'：達悟文（含拉丁字母，不含漢字）
-    - 'mixed'：混合文字（同時含漢字與拉丁字母）
-    - 'unknown'：其他
+    依文字與文法特徵判斷原始輸入是中文還是達悟文：
+    - 'zh'：大多數為漢字且文法可辨識為中文（例如中文句子混合 AI 等羅馬字）
+    - 'tao'：主要使用羅馬字且文法特徵符合達悟語
     """
     s = (text or "").strip()
     if not s:
-        return "unknown"
-    has_cjk = bool(re.search(r"[\u4e00-\u9fff\u3400-\u4dbf]", s))
-    has_latin = bool(re.search(r"[A-Za-z]", s))
-    if has_cjk and has_latin:
-        return "mixed"
-    if has_cjk:
-        return "zh"
-    if has_latin:
         return "tao"
-    return "unknown"
+    
+    # 統計 CJK 漢字與拉丁文字母數
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf]", s))
+    latin_count = len(re.findall(r"[A-Za-z]", s))
+    
+    # 達悟語常用文法詞彙/格標記/代名詞集 (格標記: o, no, do; 連接/話題: a, am, kano; 代名詞: ko, mo, ya, nia 等)
+    tao_grammar_words = {
+        "a", "am", "no", "do", "o", "kano", "ji", "ya", "ko", "mo", "nia",
+        "nire", "ikongo", "akokay", "ayoy", "ciring", "tao", "sirisiring", "vahay"
+    }
+    
+    tokens = [t.strip(".,!?;:\"“”()[]「」『』。，！？；：、…—–'").lower() for t in s.split()]
+    tao_grammar_hits = sum(1 for t in tokens if t in tao_grammar_words)
+    
+    # 若漢字數量明確大於羅馬字，或包含漢字且未出現明確達悟語文法特徵，判定為中文
+    if cjk_count > latin_count or (cjk_count > 0 and tao_grammar_hits == 0):
+        return "zh"
+    
+    return "tao"
 
 
 def extract_romanized_tokens(text: str) -> list[str]:
@@ -81,7 +89,6 @@ def preserve_romanized_tokens(tao_text: str, source_text: str) -> str:
     by_lower = {t.lower(): t for t in orig_tokens}
     result = tao_text
     for lower_tok, exact_tok in by_lower.items():
-        # 若句子中出現大小寫不同但字母相同的詞，替換為使用者輸入的精準拼法
         pattern = re.compile(rf"\b{re.escape(lower_tok)}\b", flags=re.IGNORECASE)
         result = pattern.sub(exact_tok, result)
     return result
@@ -134,7 +141,6 @@ st.markdown(
         gap: 0 !important;
         width: 100% !important;
     }
-    /* 句子流式排列：把 container 內每個單字（純文字或 popover）排成同一行並自動換行 */
     :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]) {
         width: auto !important;
         flex: 0 0 auto !important;
@@ -147,7 +153,6 @@ st.markdown(
     :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]) [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
     .tao-w, .tao-punct, .tao-lead { font-size: 20px; font-weight: bold; line-height: 2.0; }
 
-    /* 螢光標籤單字（popover 按鈕）：Y = 黃色、R = 紅色 */
     [class*="_hlY_"] button, [class*="_hlR_"] button {
         border: none !important;
         box-shadow: none !important;
@@ -275,21 +280,21 @@ def build_edit_record(ai_data, q_fallback, e_q_tao, e_q_zh, e_a_tao, e_a_zh):
 def save_語料_to_supabase(
     user_info,
     bg_info,
-    q_orig,
-    q_trans,
+    q_tao,
+    q_zh,
     r_tao,
     r_zh,
     is_edited=False,
     is_error=False,
     is_public=True,
-    input_lang_type=None,
+    origin=None,
     pending_sentence_id=None,
     edit_record=None,
 ):
     try:
         region_val = bg_info["region"]
         region_str = ", ".join(region_val) if isinstance(region_val, list) else region_val
-        lang_type = input_lang_type or detect_input_lang_type(q_orig)
+        input_origin = origin or detect_input_origin(q_tao if origin == "tao" else q_zh)
 
         data = {
             "user_id": user_info["username"],
@@ -297,8 +302,8 @@ def save_語料_to_supabase(
             "region": region_str,
             "age_group": bg_info["age_group"],
             "gender": bg_info["gender"],
-            "q_original": q_orig,
-            "q_trans": q_trans,
+            "q_tao": q_tao,
+            "q_zh": q_zh,
             "q_audio_data": None,
             "q_audio_mime": None,
             "tao_text": r_tao,
@@ -308,11 +313,12 @@ def save_語料_to_supabase(
             "is_edited": 1 if is_edited else 0,
             "error_count": 1 if is_error else 0,
             "is_public": bool(is_public),
-            "input_lang_type": lang_type,
+            "origin": input_origin,
             "timestamp": datetime.datetime.now().isoformat(),
         }
 
         payload = dict(data)
+        # 容錯處理：舊欄位名稱相容
         while True:
             try:
                 res_ins = supabase.from_("feedback").insert(payload).execute()
@@ -320,7 +326,11 @@ def save_語料_to_supabase(
             except Exception as col_err:
                 err_msg = str(col_err)
                 removed = False
-                for opt_col in ("is_public", "input_lang_type"):
+                if "q_tao" in err_msg and "q_original" not in payload:
+                    payload["q_original"] = payload.pop("q_tao")
+                    payload["q_trans"] = payload.pop("q_zh", None)
+                    removed = True
+                for opt_col in ("is_public", "origin", "input_lang_type"):
                     if opt_col in payload and opt_col in err_msg:
                         payload.pop(opt_col)
                         removed = True
@@ -403,6 +413,14 @@ def is_public_feedback(fb):
     if val is None:
         return True
     return bool(val)
+
+
+def get_fb_q_tao(fb):
+    return fb.get("q_tao") or fb.get("q_original") or ""
+
+
+def get_fb_q_zh(fb):
+    return fb.get("q_zh") or fb.get("q_trans") or ""
 
 
 def _first_col(row, names):
@@ -644,18 +662,14 @@ def _build_word_index_cached():
                 add(item["tao"], item["zh"], "corpus", wordlist=True)
 
     try:
-        for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text, is_public"):
+        rows = fetch_all_rows("feedback")
+        for r in rows:
             if not is_public_feedback(r):
                 continue
-            add(r.get("q_original"), r.get("q_trans"), "community")
+            add(get_fb_q_tao(r), get_fb_q_zh(r), "community")
             add(r.get("tao_text"), r.get("zh_text"), "community")
     except Exception:
-        try:
-            for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text"):
-                add(r.get("q_original"), r.get("q_trans"), "community")
-                add(r.get("tao_text"), r.get("zh_text"), "community")
-        except Exception:
-            pass
+        pass
 
     return index
 
@@ -1044,11 +1058,11 @@ def load_user_votes(voter_id):
 def load_user_typed_words(username):
     words = []
     try:
-        rows = fetch_all_rows("feedback", "q_original, tao_text, is_edited", eq={"user_id": username})
+        rows = fetch_all_rows("feedback", eq={"user_id": username})
     except Exception:
         return words
     for r in rows:
-        texts = [r.get("q_original")]
+        texts = [get_fb_q_tao(r)]
         if r.get("is_edited"):
             texts.append(r.get("tao_text"))
         for t in texts:
@@ -1136,11 +1150,11 @@ def load_variant_stats():
             s["gender"][gender] = s["gender"].get(gender, 0) + 1
 
     try:
-        rows = fetch_all_rows("feedback", "user_id, q_original, tao_text, is_edited, region, age_group, gender")
+        rows = fetch_all_rows("feedback")
     except Exception:
         rows = []
     for r in rows:
-        texts = [r.get("q_original")]
+        texts = [get_fb_q_tao(r)]
         if r.get("is_edited"):
             texts.append(r.get("tao_text"))
         for w in {normalize_word(t) for tx in texts for t in (tx or "").split()}:
@@ -1454,13 +1468,13 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
 
 # --- 6. 雙軌邏輯 ---
 def process_ai_input(text_prompt=None):
-    lang_type = detect_input_lang_type(text_prompt)
+    origin = detect_input_origin(text_prompt)
     roman_tokens = extract_romanized_tokens(text_prompt)
 
     if text_prompt:
         algo_result = algorithm_first_processing(text_prompt)
         if algo_result:
-            algo_result["input_lang_type"] = lang_type
+            algo_result["origin"] = origin
             return algo_result
 
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -1484,10 +1498,10 @@ def process_ai_input(text_prompt=None):
     loanword_context = build_loanword_context() or "（無）"
 
     roman_rule = ""
-    if roman_tokens:
+    if roman_tokens and origin == "zh":
         roman_rule = (
-            f"\n6. 使用者輸入中包含以下羅馬字拼法：{', '.join(roman_tokens)}。"
-            f"在轉譯或生成達悟語句子時，若用到這些概念或詞彙，必須原封不動使用這些羅馬字拼法（例如保留「{roman_tokens[0]}」），不可改寫成其他拼法或改動大小寫。"
+            f"\n6. 使用者輸入的中文裡包含以下羅馬字拼法：{', '.join(roman_tokens)}。"
+            f"在轉譯或生成達悟語句子時，若用到這些概念，必須原封不動保留該羅馬字拼法（例如保留「{roman_tokens[0]}」），不可改寫成其他音譯拼法或改變大小寫。"
         )
 
     system_prompt = f"""
@@ -1562,7 +1576,7 @@ def process_ai_input(text_prompt=None):
             if result["new_words"]:
                 result["is_ai_generated"] = True
 
-            result["input_lang_type"] = lang_type
+            result["origin"] = origin
             return result
         except ResourceExhausted:
             if attempt < max_retries - 1:
@@ -1712,11 +1726,11 @@ if main_menu == "miAI ko / 我要用AI":
             ai_data = st.session_state.ai_data
             q_orig = st.session_state.get("active_q", "")
             bg_info = st.session_state.get("active_bg", current_bg)
-            lang_type = ai_data.get("input_lang_type") or detect_input_lang_type(q_orig)
+            input_origin = ai_data.get("origin") or detect_input_origin(q_orig)
 
             reg_val = bg_info["region"]
             reg_str = ", ".join(reg_val) if isinstance(reg_val, list) else reg_val
-            user_profile_str = f"部落: {reg_str} | 年齡層: {bg_info['age_group']} | 性別: {bg_info['gender']} | 原始輸入類型: {lang_type}"
+            user_profile_str = f"部落: {reg_str} | 年齡層: {bg_info['age_group']} | 性別: {bg_info['gender']} | 原始輸入語言: {input_origin}"
             is_ai = ai_data.get("is_ai_generated", False)
 
             st.markdown("---")
@@ -1788,6 +1802,7 @@ if main_menu == "miAI ko / 我要用AI":
             if "apiya" in eval_choice:
                 if st.button("voka ✅ 直接送出儲存至 Supabase"):
                     final_q_tao = canon_apostrophes((ai_data.get("user_recognized_tao") or q_orig).strip())
+                    final_q_zh = ai_data.get("user_translation") or ""
                     final_r_tao = preserve_romanized_tokens(
                         canon_apostrophes((ai_data.get("ai_reply_tao") or "").strip()),
                         q_orig,
@@ -1796,13 +1811,13 @@ if main_menu == "miAI ko / 我要用AI":
                         st.session_state.user_info,
                         bg_info,
                         final_q_tao,
-                        ai_data.get("user_translation"),
+                        final_q_zh,
                         final_r_tao,
                         ai_data.get("ai_reply_zh"),
                         is_edited=False,
                         is_error=False,
                         is_public=is_public_selected,
-                        input_lang_type=lang_type,
+                        origin=input_origin,
                         pending_sentence_id=ai_data.get("sentence_id"),
                     ):
                         register_new_words(ai_data, final_r_tao, st.session_state.user_info["username"])
@@ -1836,7 +1851,7 @@ if main_menu == "miAI ko / 我要用AI":
                         is_edited=True,
                         is_error=True,
                         is_public=is_public_selected,
-                        input_lang_type=lang_type,
+                        origin=input_origin,
                         edit_record=build_edit_record(
                             ai_data, q_orig,
                             clean_e_q_tao, e_q_trans, clean_e_r_tao, e_r_zh,
@@ -1847,7 +1862,7 @@ if main_menu == "miAI ko / 我要用AI":
                         del st.session_state.ai_data
                         st.rerun()
 
-        # --- 使用者自己的歷史對話紀錄（可檢視與直接刪除） ---
+        # --- 使用者自己的歷史對話紀錄 ---
         st.divider()
         st.markdown(dual_text("no ciriciring mo a nimareng", "我的歷史對話紀錄", is_title=True), unsafe_allow_html=True)
         try:
@@ -1863,17 +1878,19 @@ if main_menu == "miAI ko / 我要用AI":
                 for item in my_history:
                     item_id = item.get("id")
                     pub_badge = "🌐 公開" if is_public_feedback(item) else "🔒 不公開"
-                    item_lang = item.get("input_lang_type") or detect_input_lang_type(item.get("q_original"))
+                    q_tao_val = get_fb_q_tao(item)
+                    q_zh_val = get_fb_q_zh(item)
+                    item_origin = item.get("origin") or detect_input_origin(q_tao_val)
                     ts_str = str(item.get("timestamp") or "")[:19].replace("T", " ")
-                    with st.expander(f"💬 #{item_id}｜{pub_badge}｜{item_lang}｜{ts_str}｜{item.get('q_original') or ''}"):
-                        st.markdown(f"**問（pacici）**：{item.get('q_original') or ''}")
-                        if item.get("q_trans"):
-                            st.caption(f"問題翻譯：{item.get('q_trans')}")
-                        st.markdown(f"**答（tovis）**：{item.get('tao_text') or ''}")
+                    with st.expander(f"💬 #{item_id}｜{pub_badge}｜origin: {item_origin}｜{ts_str}｜{q_tao_val}"):
+                        st.markdown(f"**問 (q_tao)**：{q_tao_val}")
+                        if q_zh_val:
+                            st.caption(f"翻譯 (q_zh)：{q_zh_val}")
+                        st.markdown(f"**答 (tao_text)**：{item.get('tao_text') or ''}")
                         if item.get("zh_text"):
-                            st.caption(f"回應翻譯：{item.get('zh_text')}")
+                            st.caption(f"回應翻譯 (zh_text)：{item.get('zh_text')}")
                         st.caption(
-                            f"狀態：{pub_badge}｜輸入類型：{item_lang}｜"
+                            f"狀態：{pub_badge}｜原始語言 (origin)：{item_origin}｜"
                             f"部落：{item.get('region') or ''}｜年齡：{item.get('age_group') or ''}｜性別：{item.get('gender') or ''}"
                         )
                         if st.button(f"🗑️ 刪除此筆對話 (#{item_id})", key=f"del_my_fb_{item_id}"):
@@ -1906,39 +1923,20 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 _d = diagnose_corpus_table()
                 if _d["error"]:
                     st.error(f"查詢 corpus 資料表時發生錯誤：{_d['error']}")
-                    st.caption("若訊息是找不到資料表（PGRST205），代表資料表名稱不是 corpus 或尚未建立；若是權限錯誤，請檢查金鑰與 RLS policy。")
                 elif not _d["count"]:
                     st.error("查詢成功，但 corpus 讀到 0 筆。")
-                    st.markdown(
-                        "常見原因有兩個：\n"
-                        "1. 資料表本身是空的（到 Supabase 的 Table Editor 確認 corpus 有沒有資料）。\n"
-                        "2. 資料表有資料，但啟用了 RLS 又沒有 select policy。這種情況 Supabase **不會報錯，只會回傳空結果**。"
-                        "請到 SQL Editor 執行："
-                    )
-                    st.code(
-                        "alter table public.corpus enable row level security;\n"
-                        "create policy \"corpus select\" on public.corpus for select using (true);",
-                        language="sql",
-                    )
                 else:
                     load_all_raw_corpus.clear()
                     build_word_index.clear()
-                    st.warning(
-                        f"資料表現在讀得到 {_d['count']} 筆語料，但程式裡還留著先前讀到空結果的快取。"
-                        "已自動清除，請重新整理頁面（或操作任一元件）再看一次。"
-                    )
-                    st.write("資料表前幾列：", _d["sample"])
+                    st.warning("快取已自動清除，請重新整理頁面。")
             else:
                 _empty = sum(1 for it in _official if not it["tao"].strip())
                 if _empty == len(_official):
-                    st.error("讀到了語料列，但達悟語欄位（tao_text）全是空的。請對照下面實際的資料內容。")
-                    st.write("資料表前幾列：", diagnose_corpus_table()["sample"])
+                    st.error("讀到了語料列，但達悟語欄位全是空的。")
                 elif _empty:
                     st.warning(f"有 {_empty} 筆語料的達悟語欄位是空的。")
                 _top = sorted(_widx.items(), key=lambda kv: -kv[1]["count"])[:10]
                 st.markdown("- 最常出現的字：" + "、".join(f"{w}（{e['count']}）" for w, e in _top))
-                _s = _official[0]
-                st.caption(f"斷詞範例：{_s['tao']} → {[normalize_word(t) for t in _s['tao'].split() if normalize_word(t)]}")
         except Exception as diag_err:
             st.error(f"診斷失敗：{diag_err}")
         if st.button("🔄 重新載入語料庫（清除快取）", key="reload_corpus_cache"):
@@ -1975,7 +1973,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 site_count = build_word_index().get(query, {}).get("count", 0)
 
                 tok_sets = {
-                    fb["id"]: {normalize_word(t) for t in f"{fb.get('q_original') or ''} {fb.get('tao_text') or ''}".split()}
+                    fb["id"]: {normalize_word(t) for t in f"{get_fb_q_tao(fb)} {fb.get('tao_text') or ''}".split()}
                     for fb in feedbacks
                 }
                 root = vd["group_of"].get(query)
@@ -2021,7 +2019,9 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
             for fb in shown:
                 fb_id = fb["id"]
-                fb_lang = fb.get("input_lang_type") or detect_input_lang_type(fb.get("q_original"))
+                q_tao_val = get_fb_q_tao(fb)
+                q_zh_val = get_fb_q_zh(fb)
+                fb_origin = fb.get("origin") or detect_input_origin(q_tao_val)
 
                 with st.expander(
                     f"📌 語料 ID #{fb_id} - 由 {fb.get('user_id', '匿名')} 提供 ({str(fb.get('timestamp', ''))[:10]})",
@@ -2030,15 +2030,15 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                     with st.container(border=True):
                         st.markdown("<div style='font-size: 16px; font-weight: bold;'>pacici (問)</div>", unsafe_allow_html=True)
                         render_interactive_sentence(
-                            fb.get('q_original', ''),
+                            q_tao_val,
                             is_ai_generated=False,
                             user_accepted=True,
                             key_prefix=f"fbq_{fb_id}",
                             enable_word_voting=False,
                             current_user=current_user,
-                            user_input_text=fb.get('q_original', ''),
+                            user_input_text=q_tao_val,
                         )
-                        st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{fb.get('q_trans') or ''}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{q_zh_val}</div>", unsafe_allow_html=True)
 
                     st.markdown("##### tovis (答 - 點擊有螢光標籤的單字即可查看說明與投票)")
                     
@@ -2056,7 +2056,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                     st.markdown(
                         f"""
                         <div style="font-size: 14px; opacity: 0.8; margin-top: 5px;">
-                            <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')} | <b>輸入類型:</b> {fb_lang}
+                            <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')} | <b>origin:</b> {fb_origin}
                         </div>
                         """,
                         unsafe_allow_html=True
