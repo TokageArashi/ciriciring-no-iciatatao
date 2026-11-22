@@ -43,11 +43,9 @@ def detect_input_origin(text: str) -> str:
     if not s:
         return "tao"
     
-    # 統計 CJK 漢字與拉丁文字母數
     cjk_count = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf]", s))
     latin_count = len(re.findall(r"[A-Za-z]", s))
     
-    # 達悟語常用文法詞彙/格標記/代名詞集 (格標記: o, no, do; 連接/話題: a, am, kano; 代名詞: ko, mo, ya, nia 等)
     tao_grammar_words = {
         "a", "am", "no", "do", "o", "kano", "ji", "ya", "ko", "mo", "nia",
         "nire", "ikongo", "akokay", "ayoy", "ciring", "tao", "sirisiring", "vahay"
@@ -56,7 +54,6 @@ def detect_input_origin(text: str) -> str:
     tokens = [t.strip(".,!?;:\"“”()[]「」『』。，！？；：、…—–'").lower() for t in s.split()]
     tao_grammar_hits = sum(1 for t in tokens if t in tao_grammar_words)
     
-    # 若漢字數量明確大於羅馬字，或包含漢字且未出現明確達悟語文法特徵，判定為中文
     if cjk_count > latin_count or (cjk_count > 0 and tao_grammar_hits == 0):
         return "zh"
     
@@ -318,7 +315,6 @@ def save_語料_to_supabase(
         }
 
         payload = dict(data)
-        # 容錯處理：舊欄位名稱相容
         while True:
             try:
                 res_ins = supabase.from_("feedback").insert(payload).execute()
@@ -478,7 +474,7 @@ def _load_all_raw_corpus_cached():
                     "id": f"Corpus ID #{r.get('id')}",
                     "tao": tao,
                     "zh": zh,
-                    "source": r.get("source") or "官方語料庫",
+                    "source": r.get("source") or "語料庫",
                     "full_text": f"{tao} {zh}".lower(),
                 }
             )
@@ -929,7 +925,7 @@ def spellcheck_notes(sentence, limit=5):
         elif sc["suggestions"]:
             notes.append(f"「{w}」→ 你是不是想寫 {'、'.join(s[0] for s in sc['suggestions'])}")
         elif sc["odd_chars"]:
-            notes.append(f"「{w}」含有官方語料中罕見的字母 {'、'.join(sc['odd_chars'])}")
+            notes.append(f"「{w}」含有語料庫中罕見的字母 {'、'.join(sc['odd_chars'])}")
         if len(notes) >= limit:
             break
     return notes
@@ -1252,13 +1248,20 @@ def apply_spelling_prefs(text, prefs):
 
 
 def classify_word(count, in_user_input, is_ai_generated, user_accepted):
+    """
+    判定單字顯示與標記顏色：
+    - count > HIGHLIGHT_THRESHOLD：一般高頻詞，不標色
+    - count == 0：
+        * 若該字為使用者原始輸入所寫（in_user_input=True），標記為黃色（使用者輸入）
+        * 若語料庫與網站皆無、且非使用者原始輸入的羅馬字排列，則標記為紅色（AI 生成）
+    - 0 < count <= HIGHLIGHT_THRESHOLD：低用例詞彙，標記為黃色
+    """
     if count > HIGHLIGHT_THRESHOLD:
         return None
     if count == 0:
         if in_user_input:
             return "yellow"
-        if is_ai_generated and not user_accepted:
-            return "red"
+        return "red"
     return "yellow"
 
 
@@ -1273,7 +1276,11 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
     word_index = build_word_index()
     vote_data = load_vote_data()
     notes = load_word_notes()
-    user_words = {normalize_word(t) for t in (user_input_text or "").split()} - {""}
+    # 僅比對使用者實際輸入的原始羅馬字/詞彙，避免 AI 翻譯出的新詞被誤認為使用者輸入
+    raw_user_words = {
+        normalize_word(t)
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9'’ʼʻ-]*", user_input_text or "")
+    } - {""}
 
     skey = sentence_key(fb_id, sentence_id)
     my_votes = load_user_votes(current_user) if (enable_word_voting and current_user) else set()
@@ -1288,7 +1295,8 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                 clean_w = normalize_word(w)
                 info = word_index.get(clean_w, {})
                 occ_count = info.get("count", 0)
-                level = classify_word(occ_count, clean_w in user_words, is_ai_generated, user_accepted)
+                in_user_raw = clean_w in raw_user_words
+                level = classify_word(occ_count, in_user_raw, is_ai_generated, user_accepted)
 
                 if level is None:
                     _plain(w)
@@ -1305,11 +1313,11 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                         zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
                     corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
                     if level == "red":
-                        category_title = "🔴 AI 自創字（官方語料與社群例句都沒有）"
-                    elif occ_count == 0:
-                        category_title = "🟡 使用者輸入的字（官方語料與社群例句都沒有）"
+                        category_title = "🔴 AI 生成（語料庫與網站中未曾出現，且非使用者輸入）"
+                    elif occ_count == 0 and in_user_raw:
+                        category_title = "🟡 使用者輸入（語料庫與網站中未曾出現，由使用者輸入）"
                     else:
-                        category_title = f"🟡 低用例詞彙（官方語料有 {corpus_n} 次，用例 10 次以內）"
+                        category_title = f"🟡 低用例詞彙（語料庫有 {corpus_n} 次，用例 10 次以內）"
                     tag = "hlR" if level == "red" else "hlY"
 
                     group_root = vote_data["group_of"].get(clean_w)
@@ -1333,18 +1341,18 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
                             if sc["glottal"]:
                                 st.markdown(
                                     "- 只差喉塞音符號（'）的已知字："
-                                    + "、".join(f"**{c}**（官方語料 {n} 次）" for c, n in sc["glottal"])
+                                    + "、".join(f"**{c}**（語料庫 {n} 次）" for c, n in sc["glottal"])
                                 )
                             if sc["suggestions"]:
                                 st.markdown(
                                     "- 你是不是想寫："
-                                    + "、".join(f"**{c}**（官方語料 {n} 次，差 {d} 個字母）" for c, d, n in sc["suggestions"])
+                                    + "、".join(f"**{c}**（語料庫 {n} 次，差 {d} 個字母）" for c, d, n in sc["suggestions"])
                                 )
                             if sc["odd_chars"]:
-                                st.markdown("- 寫法提醒：字母 " + "、".join(f"「{c}」" for c in sc["odd_chars"]) + " 在官方語料中幾乎沒有出現過")
+                                st.markdown("- 寫法提醒：字母 " + "、".join(f"「{c}」" for c in sc["odd_chars"]) + " 在語料庫中幾乎沒有出現過")
                         if etymology_text and (example_zh or gloss) and not note:
                             st.markdown(f"- **語源說明**: {etymology_text}")
-                        st.markdown(f"- **本站總用例數**: `{occ_count}` 次（官方語料 {corpus_n} ＋ 社群例句 {comm_n}）")
+                        st.markdown(f"- **本站總用例數**: `{occ_count}` 次（語料庫 {corpus_n} ＋ 社群例句 {comm_n}）")
 
                         if current_user:
                             current_desc = note["description"] if note else etymology_text
@@ -1745,7 +1753,7 @@ if main_menu == "miAI ko / 我要用AI":
                     key_prefix="main_user",
                     enable_word_voting=False,
                     current_user=st.session_state.user_info["username"],
-                    user_input_text=user_sentence,
+                    user_input_text=q_orig,
                 )
                 st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{ai_data.get('user_translation', '')}</div>", unsafe_allow_html=True)
                 _notes_user = spellcheck_notes(user_sentence)
@@ -1761,7 +1769,7 @@ if main_menu == "miAI ko / 我要用AI":
                 key_prefix="main_reply",
                 enable_word_voting=True,
                 current_user=st.session_state.user_info["username"],
-                user_input_text=ai_data.get("user_recognized_tao", q_orig),
+                user_input_text=q_orig,
                 sentence_id=ai_data.get("sentence_id")
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
@@ -1912,14 +1920,14 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         try:
             _raw = load_all_raw_corpus()
             _pending = [it for it in _raw if is_unverified(it)]
-            _official = [it for it in _raw if not it.get("is_feedback") and not is_unverified(it)]
+            _corpus_only = [it for it in _raw if not it.get("is_feedback") and not is_unverified(it)]
             _widx = build_word_index()
             st.markdown(
-                f"- 官方語料：**{len(_official)}** 筆；已驗證併入的社群語料：**{len(_raw) - len(_official) - len(_pending)}** 筆；"
+                f"- 語料庫：**{len(_corpus_only)}** 筆；已驗證併入的社群語料：**{len(_raw) - len(_corpus_only) - len(_pending)}** 筆；"
                 f"待審的 AI 生成例句：**{len(_pending)}** 筆（不計入用例與比對）\n"
                 f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次才是一般單字，其餘會標示螢光"
             )
-            if not _official:
+            if not _corpus_only:
                 _d = diagnose_corpus_table()
                 if _d["error"]:
                     st.error(f"查詢 corpus 資料表時發生錯誤：{_d['error']}")
@@ -1930,8 +1938,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                     build_word_index.clear()
                     st.warning("快取已自動清除，請重新整理頁面。")
             else:
-                _empty = sum(1 for it in _official if not it["tao"].strip())
-                if _empty == len(_official):
+                _empty = sum(1 for it in _corpus_only if not it["tao"].strip())
+                if _empty == len(_corpus_only):
                     st.error("讀到了語料列，但達悟語欄位全是空的。")
                 elif _empty:
                     st.warning(f"有 {_empty} 筆語料的達悟語欄位是空的。")
@@ -1982,7 +1990,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
 
                 st.markdown(
                     f"**「{query}」** 共有 **{counts[query]}** 筆公開社群例句"
-                    f"（本站總用例 {site_count} 次，含官方語料與公開社群例句）"
+                    f"（本站總用例 {site_count} 次，含語料庫與公開社群例句）"
                 )
 
                 include_variants = False
@@ -1999,14 +2007,14 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 forms = {x for x in ({query, *variants} if include_variants else {query})}
                 shown = [fb for fb in feedbacks if tok_sets[fb["id"]] & forms]
 
-                official = [it for it in load_all_raw_corpus() if not it.get("is_feedback") and not is_unverified(it)]
+                corpus_pool = [it for it in load_all_raw_corpus() if not it.get("is_feedback") and not is_unverified(it)]
                 corpus_hits = [
-                    it for it in official
+                    it for it in corpus_pool
                     if forms & {normalize_word(t) for t in (it.get("tao") or "").split()}
                 ]
-                st.markdown(f"📚 官方語料庫：**{len(corpus_hits)}** 筆句子")
+                st.markdown(f"📚 語料庫：**{len(corpus_hits)}** 筆句子")
                 if corpus_hits:
-                    with st.expander("查看官方語料例句"):
+                    with st.expander("查看語料庫例句"):
                         for it in corpus_hits[:20]:
                             st.markdown(f"- {it['tao']} — {it['zh']}")
                         if len(corpus_hits) > 20:
@@ -2036,7 +2044,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             key_prefix=f"fbq_{fb_id}",
                             enable_word_voting=False,
                             current_user=current_user,
-                            user_input_text=q_tao_val,
+                            user_input_text=q_tao_val if fb_origin == "tao" else "",
                         )
                         st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{q_zh_val}</div>", unsafe_allow_html=True)
 
@@ -2049,7 +2057,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         key_prefix=f"fb_{fb_id}",
                         enable_word_voting=True,
                         fb_id=fb_id,
-                        current_user=current_user
+                        current_user=current_user,
+                        user_input_text=q_tao_val if fb_origin == "tao" else "",
                     )
                     st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 8px;'>{fb.get('zh_text')}</div>", unsafe_allow_html=True)
 
@@ -2073,7 +2082,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
 
         ### 系統特色
-        1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者推薦字顯示**黃色螢光筆**；AI 自創字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
+        1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
         3. **單字用法社群投票**：社群成員可在同一個詞的不同拼法之間投票，也能提出新的拼法；系統會依每位使用者自己的打字與投票習慣調整回應用字，彼此不互相干擾。若 AI 對單字的解釋有誤，使用者可直接修改描述，之後該字一律顯示修改後的描述；異體字僅限拼法不同或譯詞（描述）相同的字，意思只是相近的字不算。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
