@@ -93,6 +93,8 @@ def preserve_romanized_tokens(tao_text: str, source_text: str) -> str:
 
 # --- 1. 全域設定與 Supabase 連線 ---
 MODEL_NAME = "gemini-3.6-flash"
+PRIVATE_TABLE = "private_feedback"
+LOCAL_PRIVATE_DIR = ".private_user_logs"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -100,6 +102,8 @@ st.set_page_config(
 
 if "user_info" not in st.session_state:
     st.session_state.user_info = None
+if "local_private_cache" not in st.session_state:
+    st.session_state.local_private_cache = {}
 
 # 自動關閉拼字檢查
 components.html(
@@ -235,7 +239,7 @@ def login_user(username, password):
         return []
 
 
-# --- 3. Supabase 讀寫函式 ---
+# --- 3. 公開 / 私人語料讀寫函式 ---
 def word_diff(old, new):
     a, b = (old or "").split(), (new or "").split()
     sm = difflib.SequenceMatcher(None, [x.lower() for x in a], [x.lower() for x in b], autojunk=False)
@@ -274,6 +278,103 @@ def build_edit_record(ai_data, q_fallback, e_q_tao, e_q_zh, e_a_tao, e_a_zh):
     }
 
 
+def _local_private_file(username: str) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", username or "anonymous")
+    os.makedirs(LOCAL_PRIVATE_DIR, exist_ok=True)
+    return os.path.join(LOCAL_PRIVATE_DIR, f"{safe_name}.json")
+
+
+def _load_local_private_rows(username: str) -> list[dict]:
+    cache = st.session_state.local_private_cache
+    if username in cache:
+        return list(cache[username])
+    path = _local_private_file(username)
+    rows = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    rows = data
+        except Exception:
+            rows = []
+    cache[username] = rows
+    return list(rows)
+
+
+def _save_local_private_rows(username: str, rows: list[dict]) -> None:
+    st.session_state.local_private_cache[username] = list(rows)
+    path = _local_private_file(username)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def save_private_record(private_payload: dict) -> bool:
+    """將私人對話存至獨立的 private_feedback 表（不寫入 feedback 表）；若尚無該表則退回個人本機/Session 儲存。"""
+    username = private_payload["user_id"]
+    try:
+        supabase.from_(PRIVATE_TABLE).insert(private_payload).execute()
+        return True
+    except Exception:
+        rows = _load_local_private_rows(username)
+        local_rec = dict(private_payload)
+        local_rec["id"] = f"local_{uuid.uuid4().hex[:8]}"
+        local_rec["_storage"] = "local"
+        rows.insert(0, local_rec)
+        _save_local_private_rows(username, rows)
+        return True
+
+
+def fetch_user_private_records(username: str) -> list[dict]:
+    """讀取某位使用者的私人紀錄（優先自 private_feedback 讀取，並合併本機/Session 私人紀錄）。"""
+    combined = []
+    try:
+        db_rows = fetch_all_rows(
+            PRIVATE_TABLE,
+            order=[("timestamp", True), ("id", True)],
+            eq={"user_id": username},
+        )
+        for r in db_rows:
+            rec = dict(r)
+            rec["_storage"] = PRIVATE_TABLE
+            rec["is_public"] = False
+            combined.append(rec)
+    except Exception:
+        pass
+
+    for r in _load_local_private_rows(username):
+        rec = dict(r)
+        rec["_storage"] = rec.get("_storage") or "local"
+        rec["is_public"] = False
+        combined.append(rec)
+
+    combined.sort(key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+    return combined
+
+
+def delete_private_record(item: dict, current_username: str) -> tuple[bool, str]:
+    owner_id = item.get("user_id")
+    if current_username != "admin" and owner_id != current_username:
+        return False, "權限不足：您只能刪除自己的私人紀錄！"
+
+    storage = item.get("_storage")
+    item_id = item.get("id")
+    if storage == PRIVATE_TABLE:
+        try:
+            supabase.from_(PRIVATE_TABLE).delete().eq("id", item_id).eq("user_id", owner_id).execute()
+            return True, "已刪除私人對話紀錄！"
+        except Exception as e:
+            return False, f"刪除私人紀錄失敗：{e}"
+
+    rows = _load_local_private_rows(owner_id)
+    new_rows = [r for r in rows if r.get("id") != item_id]
+    _save_local_private_rows(owner_id, new_rows)
+    return True, "已刪除私人對話紀錄！"
+
+
 def save_語料_to_supabase(
     user_info,
     bg_info,
@@ -292,6 +393,26 @@ def save_語料_to_supabase(
         region_val = bg_info["region"]
         region_str = ", ".join(region_val) if isinstance(region_val, list) else region_val
         input_origin = origin or detect_input_origin(q_tao if origin == "tao" else q_zh)
+        now_iso = datetime.datetime.now().isoformat()
+
+        # 若選擇「私人」（is_public=False），直接存進個人/私人儲存區，不寫入 feedback 表
+        if not bool(is_public):
+            private_data = {
+                "user_id": user_info["username"],
+                "user_email": user_info["email"],
+                "region": region_str,
+                "age_group": bg_info["age_group"],
+                "gender": bg_info["gender"],
+                "q_tao": q_tao,
+                "q_zh": q_zh,
+                "tao_text": r_tao,
+                "zh_text": r_zh,
+                "is_edited": 1 if is_edited else 0,
+                "error_count": 1 if is_error else 0,
+                "origin": input_origin,
+                "timestamp": now_iso,
+            }
+            return save_private_record(private_data)
 
         data = {
             "user_id": user_info["username"],
@@ -309,9 +430,9 @@ def save_語料_to_supabase(
             "r_audio_mime": None,
             "is_edited": 1 if is_edited else 0,
             "error_count": 1 if is_error else 0,
-            "is_public": bool(is_public),
+            "is_public": True,
             "origin": input_origin,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": now_iso,
         }
 
         payload = dict(data)
@@ -358,7 +479,7 @@ def save_語料_to_supabase(
                 pass
         return True
     except Exception as e:
-        st.error(f"寫入 Supabase 失敗：{e}")
+        st.error(f"儲存失敗：{e}")
         return False
 
 
@@ -1058,6 +1179,8 @@ def load_user_typed_words(username):
     except Exception:
         return words
     for r in rows:
+        if not is_public_feedback(r):
+            continue
         texts = [get_fb_q_tao(r)]
         if r.get("is_edited"):
             texts.append(r.get("tao_text"))
@@ -1150,6 +1273,8 @@ def load_variant_stats():
     except Exception:
         rows = []
     for r in rows:
+        if not is_public_feedback(r):
+            continue
         texts = [get_fb_q_tao(r)]
         if r.get("is_edited"):
             texts.append(r.get("tao_text"))
@@ -1248,14 +1373,6 @@ def apply_spelling_prefs(text, prefs):
 
 
 def classify_word(count, in_user_input, is_ai_generated, user_accepted):
-    """
-    判定單字顯示與標記顏色：
-    - count > HIGHLIGHT_THRESHOLD：一般高頻詞，不標色
-    - count == 0：
-        * 若該字為使用者原始輸入所寫（in_user_input=True），標記為黃色（使用者輸入）
-        * 若語料庫與網站皆無、且非使用者原始輸入的羅馬字排列，則標記為紅色（AI 生成）
-    - 0 < count <= HIGHLIGHT_THRESHOLD：低用例詞彙，標記為黃色
-    """
     if count > HIGHLIGHT_THRESHOLD:
         return None
     if count == 0:
@@ -1276,7 +1393,6 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
     word_index = build_word_index()
     vote_data = load_vote_data()
     notes = load_word_notes()
-    # 僅比對使用者實際輸入的原始羅馬字/詞彙，避免 AI 翻譯出的新詞被誤認為使用者輸入
     raw_user_words = {
         normalize_word(t)
         for t in re.findall(r"[A-Za-z][A-Za-z0-9'’ʼʻ-]*", user_input_text or "")
@@ -1793,8 +1909,11 @@ if main_menu == "miAI ko / 我要用AI":
             st.markdown(dual_text("o kapakaapiya no ciring", "語料品質評估", is_title=True), unsafe_allow_html=True)
 
             visibility_choice = st.radio(
-                "儲存後是否公開：",
-                ["🌐 公開（其他使用者可在「看別人用AI」看到）", "🔒 不公開（僅自己可在下方歷史紀錄看到）"],
+                "儲存位置與公開設定：",
+                [
+                    "🌐 公開（存入 feedback，其他使用者可在「看別人用AI」看到）",
+                    "🔒 私人（僅存入個人私人紀錄，不寫入 feedback）",
+                ],
                 horizontal=True,
                 key="save_visibility_radio",
             )
@@ -1808,7 +1927,7 @@ if main_menu == "miAI ko / 我要用AI":
             )
 
             if "apiya" in eval_choice:
-                if st.button("voka ✅ 直接送出儲存至 Supabase"):
+                if st.button("voka ✅ 直接送出儲存"):
                     final_q_tao = canon_apostrophes((ai_data.get("user_recognized_tao") or q_orig).strip())
                     final_q_zh = ai_data.get("user_translation") or ""
                     final_r_tao = preserve_romanized_tokens(
@@ -1828,8 +1947,9 @@ if main_menu == "miAI ko / 我要用AI":
                         origin=input_origin,
                         pending_sentence_id=ai_data.get("sentence_id"),
                     ):
-                        register_new_words(ai_data, final_r_tao, st.session_state.user_info["username"])
-                        st.success("🎉 已成功儲存！")
+                        if is_public_selected:
+                            register_new_words(ai_data, final_r_tao, st.session_state.user_info["username"])
+                        st.success("🎉 已成功儲存至私人紀錄！" if not is_public_selected else "🎉 已成功儲存至 feedback！")
                         del st.session_state.ai_data
                         st.rerun()
 
@@ -1865,27 +1985,43 @@ if main_menu == "miAI ko / 我要用AI":
                             clean_e_q_tao, e_q_trans, clean_e_r_tao, e_r_zh,
                         ),
                     ):
-                        register_new_words(ai_data, clean_e_r_tao, st.session_state.user_info["username"])
-                        st.success("🎉 已成功更新修正版")
+                        if is_public_selected:
+                            register_new_words(ai_data, clean_e_r_tao, st.session_state.user_info["username"])
+                        st.success("🎉 已成功儲存私人修正版！" if not is_public_selected else "🎉 已成功更新修正版")
                         del st.session_state.ai_data
                         st.rerun()
 
-        # --- 使用者自己的歷史對話紀錄 ---
+        # --- 使用者自己的歷史對話紀錄（含 feedback 與個人私人紀錄） ---
         st.divider()
         st.markdown(dual_text("no ciriciring mo a nimareng", "我的歷史對話紀錄", is_title=True), unsafe_allow_html=True)
         try:
-            my_history = fetch_all_rows(
+            public_my_history = fetch_all_rows(
                 "feedback",
                 order=[("timestamp", True), ("id", True)],
                 eq={"user_id": user["username"]},
             )
-            if not my_history:
+            combined_history = []
+            for item in public_my_history:
+                rec = dict(item)
+                rec["_source_table"] = "feedback"
+                combined_history.append(rec)
+
+            for priv_item in fetch_user_private_records(user["username"]):
+                rec = dict(priv_item)
+                rec["_source_table"] = "private"
+                rec["is_public"] = False
+                combined_history.append(rec)
+
+            combined_history.sort(key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+
+            if not combined_history:
                 st.info("您目前尚未儲存任何對話紀錄。")
             else:
-                st.caption(f"共 {len(my_history)} 筆對話紀錄")
-                for item in my_history:
+                st.caption(f"共 {len(combined_history)} 筆對話紀錄")
+                for idx_h, item in enumerate(combined_history):
                     item_id = item.get("id")
-                    pub_badge = "🌐 公開" if is_public_feedback(item) else "🔒 不公開"
+                    is_priv = item.get("_source_table") == "private" or not is_public_feedback(item)
+                    pub_badge = "🔒 私人" if is_priv else "🌐 公開"
                     q_tao_val = get_fb_q_tao(item)
                     q_zh_val = get_fb_q_zh(item)
                     item_origin = item.get("origin") or detect_input_origin(q_tao_val)
@@ -1901,8 +2037,11 @@ if main_menu == "miAI ko / 我要用AI":
                             f"狀態：{pub_badge}｜原始語言 (origin)：{item_origin}｜"
                             f"部落：{item.get('region') or ''}｜年齡：{item.get('age_group') or ''}｜性別：{item.get('gender') or ''}"
                         )
-                        if st.button(f"🗑️ 刪除此筆對話 (#{item_id})", key=f"del_my_fb_{item_id}"):
-                            ok_del, msg_del = delete_feedback_item(item_id, user["username"])
+                        if st.button(f"🗑️ 刪除此筆對話 (#{item_id})", key=f"del_my_fb_{item.get('_source_table')}_{item_id}_{idx_h}"):
+                            if is_priv:
+                                ok_del, msg_del = delete_private_record(item, user["username"])
+                            else:
+                                ok_del, msg_del = delete_feedback_item(item_id, user["username"])
                             if ok_del:
                                 st.success(msg_del)
                                 st.rerun()
