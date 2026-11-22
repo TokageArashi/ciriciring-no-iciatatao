@@ -227,6 +227,7 @@ def save_語料_to_supabase(
     r_zh,
     is_edited=False,
     is_error=False,
+    is_public=True,
     pending_sentence_id=None,
     edit_record=None,
 ):
@@ -250,11 +251,23 @@ def save_語料_to_supabase(
             "r_audio_mime": None,
             "is_edited": 1 if is_edited else 0,
             "error_count": 1 if is_error else 0,
+            "is_public": bool(is_public),
             "timestamp": datetime.datetime.now().isoformat(),
         }
-        res_ins = supabase.from_("feedback").insert(data).execute()
+        try:
+            res_ins = supabase.from_("feedback").insert(data).execute()
+        except Exception as col_err:
+            # 若資料表尚未建立 is_public 欄位，則退回不包含 is_public 的寫入
+            if "is_public" in str(col_err):
+                data_fallback = {k: v for k, v in data.items() if k != "is_public"}
+                res_ins = supabase.from_("feedback").insert(data_fallback).execute()
+                st.toast("提示：feedback 尚未建立 is_public 欄位，已先儲存對話。", icon="ℹ️")
+            else:
+                raise
+
         build_word_index.clear()
         load_user_typed_words.clear()
+        load_all_raw_corpus.clear()
 
         if edit_record and is_edited and res_ins.data:
             try:
@@ -298,6 +311,7 @@ def delete_feedback_item(feedback_id, current_username):
 
         supabase.from_("feedback").delete().eq("id", feedback_id).execute()
         build_word_index.clear()
+        load_user_typed_words.clear()
         load_all_raw_corpus.clear()
         return True, "刪除成功！"
     except Exception as e:
@@ -320,6 +334,14 @@ def is_sentence_item(item):
         and not is_unverified(item)
         and len((item.get("tao") or "").split()) > 1
     )
+
+
+def is_public_feedback(fb):
+    """預設為公開（若 is_public 欄位為 None 或 True 皆視為公開；明確為 False 則視為私人）。"""
+    val = fb.get("is_public")
+    if val is None:
+        return True
+    return bool(val)
 
 
 def _first_col(row, names):
@@ -396,6 +418,8 @@ def _load_all_raw_corpus_cached():
                 vote_counts[fid] = vote_counts.get(fid, 0) + 1
 
         for r in ready_rows:
+            if not is_public_feedback(r):
+                continue
             f_id = r.get("id")
             if vote_counts.get(f_id, 0) >= 15:
                 corpus_items.append(
@@ -559,11 +583,18 @@ def _build_word_index_cached():
                 add(item["tao"], item["zh"], "corpus", wordlist=True)
 
     try:
-        for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text"):
+        for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text, is_public"):
+            if not is_public_feedback(r):
+                continue
             add(r.get("q_original"), r.get("q_trans"), "community")
             add(r.get("tao_text"), r.get("zh_text"), "community")
     except Exception:
-        pass
+        try:
+            for r in fetch_all_rows("feedback", "q_original, q_trans, tao_text, zh_text"):
+                add(r.get("q_original"), r.get("q_trans"), "community")
+                add(r.get("tao_text"), r.get("zh_text"), "community")
+        except Exception:
+            pass
 
     return index
 
@@ -1660,7 +1691,15 @@ if main_menu == "miAI ko / 我要用AI":
 
             st.divider()
             st.markdown(dual_text("o kapakaapiya no ciring", "語料品質評估", is_title=True), unsafe_allow_html=True)
-            
+
+            visibility_choice = st.radio(
+                "儲存後是否公開：",
+                ["🌐 公開（其他使用者可在「看別人用AI」看到）", "🔒 不公開（僅自己可在下方歷史紀錄看到）"],
+                horizontal=True,
+                key="save_visibility_radio",
+            )
+            is_public_selected = visibility_choice.startswith("🌐")
+
             eval_choice = st.radio(
                 "eval_choice_radio",
                 ["apiya / 正確 (直接採納)", "beken / 錯誤 (我要修改)"],
@@ -1681,6 +1720,7 @@ if main_menu == "miAI ko / 我要用AI":
                         ai_data.get("ai_reply_zh"),
                         is_edited=False,
                         is_error=False,
+                        is_public=is_public_selected,
                         pending_sentence_id=ai_data.get("sentence_id"),
                     ):
                         register_new_words(ai_data, final_r_tao, st.session_state.user_info["username"])
@@ -1702,7 +1742,6 @@ if main_menu == "miAI ko / 我要用AI":
                 e_r_zh = st.text_input("修改句子 2 翻譯：", value=ai_data.get("ai_reply_zh", ""))
 
                 if st.button("voka 💾 儲存修正版"):
-                    # 保留使用者輸入的大小寫與喉塞音符號（僅統一不同撇號字元為半形 '）
                     clean_e_q_tao = canon_apostrophes(e_q_tao.strip())
                     clean_e_r_tao = canon_apostrophes(e_r_tao.strip())
                     if save_語料_to_supabase(
@@ -1714,6 +1753,7 @@ if main_menu == "miAI ko / 我要用AI":
                         e_r_zh,
                         is_edited=True,
                         is_error=True,
+                        is_public=is_public_selected,
                         edit_record=build_edit_record(
                             ai_data, q_orig,
                             clean_e_q_tao, e_q_trans, clean_e_r_tao, e_r_zh,
@@ -1723,6 +1763,41 @@ if main_menu == "miAI ko / 我要用AI":
                         st.success("🎉 已成功更新修正版")
                         del st.session_state.ai_data
                         st.rerun()
+
+        # --- 使用者自己的歷史對話紀錄（可檢視與直接刪除） ---
+        st.divider()
+        st.markdown(dual_text("no ciriciring mo a nimareng", "我的歷史對話紀錄", is_title=True), unsafe_allow_html=True)
+        try:
+            my_history = fetch_all_rows(
+                "feedback",
+                order=[("timestamp", True), ("id", True)],
+                eq={"user_id": user["username"]},
+            )
+            if not my_history:
+                st.info("您目前尚未儲存任何對話紀錄。")
+            else:
+                st.caption(f"共 {len(my_history)} 筆對話紀錄")
+                for item in my_history:
+                    item_id = item.get("id")
+                    pub_badge = "🌐 公開" if is_public_feedback(item) else "🔒 不公開"
+                    ts_str = str(item.get("timestamp") or "")[:19].replace("T", " ")
+                    with st.expander(f"💬 #{item_id}｜{pub_badge}｜{ts_str}｜{item.get('q_original') or ''}"):
+                        st.markdown(f"**問（pacici）**：{item.get('q_original') or ''}")
+                        if item.get("q_trans"):
+                            st.caption(f"問題翻譯：{item.get('q_trans')}")
+                        st.markdown(f"**答（tovis）**：{item.get('tao_text') or ''}")
+                        if item.get("zh_text"):
+                            st.caption(f"回應翻譯：{item.get('zh_text')}")
+                        st.caption(f"狀態：{pub_badge}｜部落：{item.get('region') or ''}｜年齡：{item.get('age_group') or ''}｜性別：{item.get('gender') or ''}")
+                        if st.button(f"🗑️ 刪除此筆對話 (#{item_id})", key=f"del_my_fb_{item_id}"):
+                            ok_del, msg_del = delete_feedback_item(item_id, user["username"])
+                            if ok_del:
+                                st.success(msg_del)
+                                st.rerun()
+                            else:
+                                st.error(msg_del)
+        except Exception as hist_err:
+            st.error(f"讀取您的歷史對話失敗：{hist_err}")
 
 elif main_menu == "manita so tao a miAI / 看別人用AI":
     st.markdown(
@@ -1790,14 +1865,14 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             st.rerun()
 
     try:
-        feedbacks = fetch_all_rows("feedback", order=[("timestamp", True), ("id", True)])
+        all_feedbacks = fetch_all_rows("feedback", order=[("timestamp", True), ("id", True)])
+        feedbacks = [fb for fb in all_feedbacks if is_public_feedback(fb)]
 
         if not feedbacks:
-            st.info("目前尚無採集到的語料。")
+            st.info("目前尚無公開的社群語料。")
         else:
             current_user = st.session_state.user_info["username"] if st.session_state.user_info else None
 
-            # --- 單字檢索：找出包含該字的例句（問句或答句），並顯示筆數與異體字 ---
             st.markdown("#### 🔍 檢索單字用例")
             search_raw = st.text_input(
                 "輸入單字，查找包含該字的用例（留空則顯示全部）",
@@ -1821,8 +1896,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 counts = {m: sum(1 for ts in tok_sets.values() if m in ts) for m in [query] + variants}
 
                 st.markdown(
-                    f"**「{query}」** 共有 **{counts[query]}** 筆社群例句"
-                    f"（本站總用例 {site_count} 次，含官方語料與社群例句）"
+                    f"**「{query}」** 共有 **{counts[query]}** 筆公開社群例句"
+                    f"（本站總用例 {site_count} 次，含官方語料與公開社群例句）"
                 )
 
                 include_variants = False
@@ -1854,7 +1929,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 if include_variants:
                     st.markdown(f"合計 **{len(shown)}** 筆（同一筆不重複計算）")
                 if not shown:
-                    st.info(f"找不到包含「{query}」的社群例句。")
+                    st.info(f"找不到包含「{query}」的公開社群例句。")
                 st.divider()
 
             for fb in shown:
