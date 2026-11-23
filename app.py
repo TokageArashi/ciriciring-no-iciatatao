@@ -391,7 +391,8 @@ DEFAULT_AUTO_PHRASES = [
 ]
 
 
-def _load_word_details_store() -> dict:
+@st.cache_data(ttl=60)
+def _load_word_details_cached() -> dict:
     if os.path.exists(WORD_DETAIL_STORE_FILE):
         try:
             with open(WORD_DETAIL_STORE_FILE, "r", encoding="utf-8") as f:
@@ -403,12 +404,18 @@ def _load_word_details_store() -> dict:
     return {}
 
 
+def _load_word_details_store() -> dict:
+    return dict(_load_word_details_cached())
+
+
 def _save_word_details_store(store: dict) -> None:
     try:
         with open(WORD_DETAIL_STORE_FILE, "w", encoding="utf-8") as f:
             json.dump(store, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+    finally:
+        _load_word_details_cached.clear()
 
 
 def get_word_detail_record(key: str) -> dict:
@@ -421,7 +428,7 @@ def get_word_detail_record(key: str) -> dict:
     - loan_lang：何種語言（音譯時必填）
     """
     k = (key or "").strip().lower()
-    store = _load_word_details_store()
+    store = _load_word_details_cached()
     rec = store.get(k) or {}
     return {
         "pipipangayan": rec.get("pipipangayan", ""),
@@ -537,7 +544,6 @@ def register_phrase(phrase: str, meaning: str = "", source: str = "manual") -> b
         store.setdefault("phrases", []).append(entry)
     _save_phrase_store(store)
 
-    # 若有初始中文解釋，同步寫入單字詳情（不覆蓋使用者既有 pipipangayan 與解釋）
     if entry["meaning"]:
         detail_store = _load_word_details_store()
         merged_key = "_".join(key.split())
@@ -771,6 +777,7 @@ def _insert_public_feedback_row(data: dict) -> bool:
     build_word_index.clear()
     load_user_typed_words.clear()
     load_all_raw_corpus.clear()
+    find_bilingual_examples.clear()
     return True
 
 
@@ -874,6 +881,7 @@ def update_existing_conversation(
             build_word_index.clear()
             load_user_typed_words.clear()
             load_all_raw_corpus.clear()
+            find_bilingual_examples.clear()
             return True, "已更新公開對話紀錄！"
 
         priv_data = {
@@ -1010,6 +1018,7 @@ def delete_feedback_item(feedback_id, current_username):
         build_word_index.clear()
         load_user_typed_words.clear()
         load_all_raw_corpus.clear()
+        find_bilingual_examples.clear()
         return True, "刪除成功！"
     except Exception as e:
         return False, f"刪除失敗：{e}"
@@ -1152,10 +1161,11 @@ def load_all_raw_corpus():
 load_all_raw_corpus.clear = _load_all_raw_corpus_cached.clear
 
 
-def find_bilingual_examples(target_word_or_phrase: str, limit: int = 5) -> list[tuple[str, str]]:
-    """從本網站蒐集到的句子（語料庫與公開社群例句）挑選包含目標詞／片語的雙語例句。"""
+@st.cache_data(ttl=120)
+def find_bilingual_examples(target_word_or_phrase: str, limit: int = 1) -> list[tuple[str, str]]:
+    """從本網站蒐集到的句子（語料庫與公開社群例句）挑選包含目標詞／片語的雙語例句（預設 1 句）。"""
     q = normalize_word(target_word_or_phrase)
-    if not q:
+    if not q or limit <= 0:
         return []
     parts = [p for p in q.split("_") if p]
     examples = []
@@ -1986,7 +1996,6 @@ def render_interactive_sentence(
                 p_info = phrase_meta.get(clean_w)
                 phrase_group_id = f"{key_prefix}_pg_{clean_w}" if p_info else None
 
-                # 片語與一般單字一視同仁：未通過認證（用例 <= 10）呈現黃色，否則黑色可點擊
                 info = word_index.get(clean_w, {})
                 occ_count = info.get("count", 0)
                 in_user_raw = clean_w in raw_user_words
@@ -2039,7 +2048,6 @@ def render_interactive_sentence(
                     st.markdown(f"- **分類**: {category_title}")
                     st.markdown(f"- **用例數**: `{occ_count}` 次（語料庫 {corpus_n} ＋ 社群例句 {comm_n}）")
 
-                    # 若為此句子中的片語組合，提供「取消此句中的片語組合」
                     if p_info and current_user:
                         if st.button("✂️ 取消此句中的片語組合", key=f"btn_cancel_sent_phr_{key_prefix}_{idx}"):
                             cancel_phrase_in_sentence(sent_track_id, p_info["phrase"])
@@ -2047,7 +2055,6 @@ def render_interactive_sentence(
                             st.rerun()
 
                     st.divider()
-                    # 1. pipipangayan（達悟文解釋，預設空白，可編輯）
                     st.markdown("**1. pipipangayan（達悟文的解釋）**")
                     inp_pipi = st.text_input(
                         "pipipangayan",
@@ -2056,7 +2063,6 @@ def render_interactive_sentence(
                         label_visibility="collapsed",
                     )
 
-                    # 2. 解釋（中文解釋，可編輯）
                     st.markdown("**2. 解釋**")
                     inp_expl = st.text_input(
                         "解釋",
@@ -2065,7 +2071,6 @@ def render_interactive_sentence(
                         label_visibility="collapsed",
                     )
 
-                    # 3. 語源（僅開放 固有詞 / 新造詞 / 音譯）
                     st.markdown("**3. 語源**")
                     cur_origin_type = detail_rec["origin_type"] if detail_rec["origin_type"] in ETYMOLOGY_OPTIONS else "固有詞"
                     sel_origin_type = st.radio(
@@ -2122,17 +2127,15 @@ def render_interactive_sentence(
                             else:
                                 st.error(msg_d)
 
-                    # 4. 例句（從本網站蒐集到的句子挑選，列出雙語）
                     st.divider()
                     st.markdown("**4. 例句（雙語）**")
-                    bilingual_exs = find_bilingual_examples(clean_w, limit=5)
+                    bilingual_exs = find_bilingual_examples(clean_w, limit=1)
                     if bilingual_exs:
                         for ex_tao, ex_zh in bilingual_exs:
                             st.markdown(f"- {ex_tao}  \n  {ex_zh}")
                     else:
                         st.caption("目前網站例句中尚無包含此詞／片語的雙語例句。")
 
-                    # 異體字與投票
                     st.divider()
                     st.markdown("#### 📊 異體字與票數（票數 ＝ 本站用例 ＋ 投票人數）")
                     for m in variants:
@@ -2223,7 +2226,6 @@ def render_interactive_sentence(
             if trail:
                 _plain(trail, "tao-punct")
 
-    # 直接在對話文句下方提供選取詞彙登錄為片語
     if allow_phrase_selection and current_user and len(tokens_list) >= 2:
         word_candidates = []
         for idx_c, tok_c in enumerate(tokens_list):
@@ -2806,6 +2808,8 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             _spell_resources.clear()
             load_variant_stats.clear()
             spell_check_word.clear()
+            _load_word_details_cached.clear()
+            find_bilingual_examples.clear()
             st.rerun()
 
     try:
@@ -2937,7 +2941,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **片語辨識與互動**：句子中出現如「蘭嶼（pongso no tao）」或已登錄片語組合時，直接於對話文句中視為一個單字單位；滑鼠懸停時整組片語會一起出現黑底線，也可在句子中選取組合登錄片語或僅取消該句的片語合併。
-        3. **單字詳情與社群投票**：點擊任何單字或片語即可編輯 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）與檢視雙語例句與用例數，也可登錄異體字或參與拼法投票。
+        3. **單字詳情與社群投票**：點擊任何單字或片語即可編輯 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）與檢視雙語例句（各詞 1 句）與用例數，也可登錄異體字或參與拼法投票。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
