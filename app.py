@@ -1954,6 +1954,43 @@ def _plain(text, css_class="tao-w", phrase_group=None):
         st.markdown(f'<span class="{css_class}">{html.escape(text)}</span>', unsafe_allow_html=True)
 
 
+def _submit_variant_vote(
+    clean_w: str,
+    w_display: str,
+    pick: str,
+    skey: str | None,
+    sentence_id: str | None,
+    fb_id: int | None,
+    current_user: str,
+    rel_part: str = "",
+) -> tuple[bool, str]:
+    """送出單一異體字拼法投票（點選即送出）。"""
+    load_user_votes.clear()
+    if skey and (skey, clean_w) in _fetch_user_votes(current_user):
+        return False, f"您已對本句的「{w_display}」投過票，無法重複投票。"
+
+    voter_info = st.session_state.user_info or {}
+    voter_region = voter_info.get("region", "未知")
+    voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
+
+    sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
+    suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
+
+    supabase.from_("community_votes").insert({
+        "feedback_id": fb_id if fb_id else 0,
+        "voter_id": current_user,
+        "region": voter_region_str,
+        "age_group": voter_info.get("age_group", "未知"),
+        "gender": voter_info.get("gender", "未知"),
+        "vote_result": "贊同" if pick == clean_w else "不贊同",
+        "hidden_suggestion": suggestion_content,
+        "timestamp": datetime.datetime.now().isoformat(),
+    }).execute()
+    load_vote_data.clear()
+    load_user_votes.clear()
+    return True, f"🎉 已投給「{pick}」！"
+
+
 def render_interactive_sentence(
     sentence,
     is_ai_generated=False,
@@ -2022,30 +2059,28 @@ def render_interactive_sentence(
                     zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
 
                 corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
-                if p_info:
-                    category_title = f"🧩 片語組合（{p_info['phrase']}）" + (" — 尚未達高頻用例（黃色）" if level == "yellow" else "")
-                elif level == "red":
-                    category_title = "🔴 AI 生成（語料庫與網站中未曾出現，且非使用者輸入）"
-                elif occ_count == 0 and in_user_raw:
-                    category_title = "🟡 使用者輸入（語料庫與網站中未曾出現，由使用者輸入）"
-                elif level == "yellow":
-                    category_title = f"🟡 低用例詞彙（語料庫有 {corpus_n} 次，用例 10 次以內）"
-                else:
-                    category_title = f"⚫ 一般詞彙（用例 {occ_count} 次，可點擊查看詳情）"
-
                 tag = "hlR" if level == "red" else ("hlY" if level == "yellow" else "hlK")
 
+                # 蒐集所有已登錄的異體字拼法（不論實際使用頻率）
                 group_root = vote_data["group_of"].get(clean_w)
-                others = [m for m in vote_data["members"].get(group_root, []) if m != clean_w]
-                usage = {m: word_index.get(m, {}).get("count", 0) for m in [clean_w] + others}
-                votes_n = {m: vote_data["tally"].get(m, 0) for m in usage}
-                totals = {m: usage[m] + votes_n[m] for m in usage}
-                variants = [clean_w] + sorted(others, key=lambda m: -totals[m])
+                all_variants_set = {clean_w}
+                if group_root:
+                    all_variants_set.update(vote_data["members"].get(group_root, []))
+                for nw_key in notes.keys():
+                    if nw_key == clean_w or (group_root and vote_data["group_of"].get(nw_key) == group_root):
+                        all_variants_set.add(nw_key)
+                    elif nw_key != clean_w and spelling_similar(clean_w, nw_key) and link_is_valid(clean_w, nw_key, "spelling", notes):
+                        all_variants_set.add(nw_key)
+
+                usage = {m: word_index.get(m, {}).get("count", 0) for m in all_variants_set}
+                votes_n = {m: vote_data["tally"].get(m, 0) for m in all_variants_set}
+                totals = {m: usage[m] + votes_n[m] for m in all_variants_set}
+                others_sorted = sorted([m for m in all_variants_set if m != clean_w], key=lambda m: (-totals[m], m))
+                variants = [clean_w] + others_sorted
 
                 popover_label = f'<span data-phrase-group="{html.escape(phrase_group_id)}">{html.escape(w)}</span>' if phrase_group_id else w
                 with st.popover(popover_label, key=f"{key_prefix}_{tag}_{idx}"):
                     st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
-                    st.markdown(f"- **分類**: {category_title}")
                     st.markdown(f"- **用例數**: `{occ_count}` 次（語料庫 {corpus_n} ＋ 社群例句 {comm_n}）")
 
                     if p_info and current_user:
@@ -2136,92 +2171,110 @@ def render_interactive_sentence(
                     else:
                         st.caption("目前網站例句中尚無包含此詞／片語的雙語例句。")
 
+                    # 5. 異體字條目（列出所有已登錄拼法，不論實際使用頻率；點選即送出，選「其他」才出現輸入框）
                     st.divider()
-                    st.markdown("#### 📊 異體字與票數（票數 ＝ 本站用例 ＋ 投票人數）")
+                    st.markdown("**5. 異體字**")
                     for m in variants:
                         mark = "（本句）" if m == clean_w else ""
                         desc_m = (notes.get(m) or {}).get("description") or "；".join(word_index.get(m, {}).get("glosses", []))
                         desc_part = f"〔{desc_m}〕" if desc_m else ""
-                        st.markdown(f"- **{m}**{mark}{desc_part}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
+                        st.markdown(f"- **{m}**{mark}{desc_part}（用例 {usage[m]}｜投票 {votes_n[m]}｜總計 {totals[m]}）")
 
                     if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
                         st.info(f"✅ 您已對本句的「{w}」投過票了")
                     elif enable_word_voting and current_user:
-                        st.markdown("#### 🗳️ 這裡該用哪個拼法？")
-                        w_choice = st.radio(
-                            "選擇拼法",
-                            variants,
+                        st.caption("點選喜歡的拼法即送出；若要登錄新的拼法，請點選「其他」：")
+                        choice_options = variants + ["其他"]
+                        pick_state_key = f"var_pick_state_{key_prefix}_{idx}"
+                        prev_pick = st.session_state.get(pick_state_key)
+
+                        selected_opt = st.radio(
+                            "選擇拼法或其他",
+                            choice_options,
+                            index=choice_options.index(prev_pick) if prev_pick in choice_options else 0,
                             key=f"w_choice_{key_prefix}_{idx}",
-                            format_func=lambda m, t=totals: f"{m}（{t[m]}）",
                             horizontal=True,
                             label_visibility="collapsed",
                         )
-                        st.caption("可登錄切分不同或拼法不同的異體字；意思只是相近的字請不要提出。")
-                        w_alt_input = st.text_input(
-                            "登錄新的異體字（單一單字；留空則只投上面的選擇）：",
-                            key=f"w_alt_{key_prefix}_{idx}",
-                            placeholder="例如：apiya",
-                        )
-                        w_rel = st.radio(
-                            "它與本字的關係：",
-                            [REL_SPELLING, REL_TRANSLATION],
-                            key=f"w_rel_{key_prefix}_{idx}",
-                        )
-                        w_shared = st.text_input(
-                            "兩字共同的中文描述（選「譯詞相同」時必填）：",
-                            key=f"w_shared_{key_prefix}_{idx}",
-                            value=note["description"] if note else "",
-                        )
 
-                        if st.button("送出投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
+                        # 若點選了已登錄的拼法選項（非「其他」）且與前次不同，立即送出
+                        if selected_opt != "其他" and selected_opt != prev_pick:
+                            st.session_state[pick_state_key] = selected_opt
                             try:
-                                load_user_votes.clear()
-                                if skey and (skey, clean_w) in _fetch_user_votes(current_user):
-                                    raise ValueError(f"您已對本句的「{w}」投過票，無法重複投票。")
-
-                                alt_raw = w_alt_input.strip()
-                                if alt_raw and re.search(r"\s", alt_raw):
-                                    raise ValueError("提出的字請只輸入單一單字。")
-                                alt = normalize_word(alt_raw)
-                                if alt_raw and not alt:
-                                    raise ValueError("提出的字無效。")
-
-                                pick, rel_part = w_choice, ""
-                                if alt and alt != clean_w:
-                                    rel = "spelling" if w_rel == REL_SPELLING else "translation"
-                                    load_word_notes.clear()
-                                    ok, msg, to_save = check_variant_proposal(clean_w, alt, rel, w_shared, load_word_notes())
-                                    if not ok:
-                                        raise ValueError(msg)
-                                    for ww, dd in to_save.items():
-                                        save_word_note(ww, dd, current_user)
-                                    pick, rel_part = alt, f" | rel:{rel}"
-                                elif alt:
-                                    pick = alt
-
-                                voter_info = st.session_state.user_info
-                                voter_region = voter_info.get("region", "未知")
-                                voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
-
-                                sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
-                                suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
-
-                                supabase.from_("community_votes").insert({
-                                    "feedback_id": fb_id if fb_id else 0,
-                                    "voter_id": current_user,
-                                    "region": voter_region_str,
-                                    "age_group": voter_info.get("age_group", "未知"),
-                                    "gender": voter_info.get("gender", "未知"),
-                                    "vote_result": "贊同" if pick == clean_w else "不贊同",
-                                    "hidden_suggestion": suggestion_content,
-                                    "timestamp": datetime.datetime.now().isoformat(),
-                                }).execute()
-                                load_vote_data.clear()
-                                load_user_votes.clear()
-                                st.success(f"🎉 已投給「{pick}」！")
-                                st.rerun()
+                                ok_v, msg_v = _submit_variant_vote(
+                                    clean_w=clean_w,
+                                    w_display=w,
+                                    pick=selected_opt,
+                                    skey=skey,
+                                    sentence_id=sentence_id,
+                                    fb_id=fb_id,
+                                    current_user=current_user,
+                                )
+                                if ok_v:
+                                    st.success(msg_v)
+                                    st.rerun()
+                                else:
+                                    st.warning(msg_v)
                             except Exception as vote_err:
                                 st.error(f"投票失敗：{vote_err}")
+                        elif selected_opt == "其他":
+                            st.session_state[pick_state_key] = "其他"
+                            w_alt_input = st.text_input(
+                                "輸入新的異體字拼法（單一單字）：",
+                                key=f"w_alt_{key_prefix}_{idx}",
+                                placeholder="例如：apiya",
+                            )
+                            w_rel = st.radio(
+                                "它與本字的關係：",
+                                [REL_SPELLING, REL_TRANSLATION],
+                                key=f"w_rel_{key_prefix}_{idx}",
+                            )
+                            w_shared = st.text_input(
+                                "兩字共同的中文描述（選「譯詞相同」時必填）：",
+                                key=f"w_shared_{key_prefix}_{idx}",
+                                value=note["description"] if note else "",
+                            )
+
+                            if st.button("送出其他拼法", key=f"btn_w_vote_{key_prefix}_{idx}"):
+                                try:
+                                    alt_raw = w_alt_input.strip()
+                                    if not alt_raw:
+                                        raise ValueError("請輸入新的異體字拼法。")
+                                    if re.search(r"\s", alt_raw):
+                                        raise ValueError("提出的字請只輸入單一單字。")
+                                    alt = normalize_word(alt_raw)
+                                    if not alt:
+                                        raise ValueError("提出的字無效。")
+
+                                    rel_part = ""
+                                    if alt != clean_w:
+                                        rel = "spelling" if w_rel == REL_SPELLING else "translation"
+                                        load_word_notes.clear()
+                                        ok, msg, to_save = check_variant_proposal(clean_w, alt, rel, w_shared, load_word_notes())
+                                        if not ok:
+                                            raise ValueError(msg)
+                                        for ww, dd in to_save.items():
+                                            save_word_note(ww, dd, current_user)
+                                        rel_part = f" | rel:{rel}"
+
+                                    ok_v, msg_v = _submit_variant_vote(
+                                        clean_w=clean_w,
+                                        w_display=w,
+                                        pick=alt,
+                                        skey=skey,
+                                        sentence_id=sentence_id,
+                                        fb_id=fb_id,
+                                        current_user=current_user,
+                                        rel_part=rel_part,
+                                    )
+                                    if ok_v:
+                                        st.session_state[pick_state_key] = alt
+                                        st.success(msg_v)
+                                        st.rerun()
+                                    else:
+                                        st.warning(msg_v)
+                                except Exception as vote_err:
+                                    st.error(f"送出失敗：{vote_err}")
 
             if trail:
                 _plain(trail, "tao-punct")
@@ -2941,7 +2994,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **片語辨識與互動**：句子中出現如「蘭嶼（pongso no tao）」或已登錄片語組合時，直接於對話文句中視為一個單字單位；滑鼠懸停時整組片語會一起出現黑底線，也可在句子中選取組合登錄片語或僅取消該句的片語合併。
-        3. **單字詳情與社群投票**：點擊任何單字或片語即可編輯 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）與檢視雙語例句（各詞 1 句）與用例數，也可登錄異體字或參與拼法投票。
+        3. **單字詳情與社群投票**：點擊任何單字或片語即可編輯 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯），查看雙語例句（各詞 1 句）、用例數與所有已登錄異體字（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
