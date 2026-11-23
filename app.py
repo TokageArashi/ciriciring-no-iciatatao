@@ -16,6 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
+
 # --- 輔助函式：上下雙語排版用 ---
 def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
     size_tao = "22px" if is_title else "18px"
@@ -26,6 +27,7 @@ def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
         <div style="font-size: {size_zh}; color: var(--secondary-text-color, #9CA3AF); line-height: 1.2;">{zh}</div>
     </div>
     """
+
 
 def lower_first_char(text: str) -> str:
     if not text:
@@ -42,21 +44,21 @@ def detect_input_origin(text: str) -> str:
     s = (text or "").strip()
     if not s:
         return "tao"
-    
+
     cjk_count = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf]", s))
     latin_count = len(re.findall(r"[A-Za-z]", s))
-    
+
     tao_grammar_words = {
         "a", "am", "no", "do", "o", "kano", "ji", "ya", "ko", "mo", "nia",
-        "nire", "ikongo", "akokay", "ayoy", "ciring", "tao", "sirisiring", "vahay"
+        "nire", "ikongo", "akokay", "ayoy", "ciring", "tao", "sirisiring", "vahay",
     }
-    
+
     tokens = [t.strip(".,!?;:\"“”()[]「」『』。，！？；：、…—–'").lower() for t in s.split()]
     tao_grammar_hits = sum(1 for t in tokens if t in tao_grammar_words)
-    
+
     if cjk_count > latin_count or (cjk_count > 0 and tao_grammar_hits == 0):
         return "zh"
-    
+
     return "tao"
 
 
@@ -95,6 +97,8 @@ def preserve_romanized_tokens(tao_text: str, source_text: str) -> str:
 MODEL_NAME = "gemini-3.6-flash"
 PRIVATE_TABLE = "private_feedback"
 LOCAL_PRIVATE_DIR = ".private_user_logs"
+PHRASE_STORE_FILE = ".phrases_store.json"
+AUTO_LOGIN_FILE = ".auto_login_tokens.json"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -104,6 +108,8 @@ if "user_info" not in st.session_state:
     st.session_state.user_info = None
 if "local_private_cache" not in st.session_state:
     st.session_state.local_private_cache = {}
+if "auto_login_checked" not in st.session_state:
+    st.session_state.auto_login_checked = False
 
 # 自動關閉拼字檢查
 components.html(
@@ -200,9 +206,84 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# --- 2. 會員機制 ---
+# --- 2. 會員機制與自動登入 ---
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
+
+
+def _load_auto_tokens() -> dict:
+    if os.path.exists(AUTO_LOGIN_FILE):
+        try:
+            with open(AUTO_LOGIN_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+
+def _save_auto_tokens(data: dict) -> None:
+    try:
+        with open(AUTO_LOGIN_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def issue_auto_login(username: str) -> None:
+    tokens = _load_auto_tokens()
+    tok = uuid.uuid4().hex
+    tokens[username] = tok
+    _save_auto_tokens(tokens)
+    try:
+        st.query_params["auto_user"] = username
+        st.query_params["auto_token"] = tok
+    except Exception:
+        pass
+
+
+def clear_auto_login(username: str | None = None) -> None:
+    tokens = _load_auto_tokens()
+    target_user = username or st.query_params.get("auto_user")
+    if target_user and target_user in tokens:
+        tokens.pop(target_user, None)
+        _save_auto_tokens(tokens)
+    try:
+        if "auto_user" in st.query_params:
+            del st.query_params["auto_user"]
+        if "auto_token" in st.query_params:
+            del st.query_params["auto_token"]
+    except Exception:
+        pass
+
+
+def try_auto_login_from_device() -> None:
+    if st.session_state.user_info is not None or st.session_state.auto_login_checked:
+        return
+    st.session_state.auto_login_checked = True
+    try:
+        q_user = st.query_params.get("auto_user")
+        q_tok = st.query_params.get("auto_token")
+    except Exception:
+        q_user, q_tok = None, None
+    if not q_user or not q_tok:
+        return
+    tokens = _load_auto_tokens()
+    if tokens.get(q_user) == q_tok:
+        try:
+            res = supabase.from_("users").select("*").eq("username", q_user).execute()
+            if res.data:
+                row = res.data[0]
+                st.session_state.user_info = {
+                    "username": row["username"],
+                    "email": row["email"],
+                    "region": row["region"],
+                    "age_group": row["age_group"],
+                    "gender": row["gender"],
+                }
+        except Exception:
+            pass
 
 
 def add_user(username, password, email, region, age_group, gender):
@@ -237,6 +318,185 @@ def login_user(username, password):
     except Exception as e:
         st.error(f"登入查詢失敗：{e}")
         return []
+
+
+try_auto_login_from_device()
+
+
+# --- 2.5 片語辨識與管理 ---
+DEFAULT_AUTO_PHRASES = [
+    {"phrase": "pongso no tao", "meaning": "蘭嶼（人之島）", "source": "auto"},
+]
+
+
+def _load_phrase_store() -> dict:
+    store = {
+        "phrases": list(DEFAULT_AUTO_PHRASES),
+        "disabled_auto": [],
+    }
+    if os.path.exists(PHRASE_STORE_FILE):
+        try:
+            with open(PHRASE_STORE_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    if isinstance(raw.get("phrases"), list):
+                        store["phrases"] = raw["phrases"]
+                    if isinstance(raw.get("disabled_auto"), list):
+                        store["disabled_auto"] = [str(x).lower().strip() for x in raw["disabled_auto"] if str(x).strip()]
+        except Exception:
+            pass
+    return store
+
+
+def _save_phrase_store(store: dict) -> None:
+    try:
+        with open(PHRASE_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def normalize_phrase_key(phrase: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (phrase or "").strip().lower())
+    return cleaned
+
+
+def is_phrase_disabled(phrase: str) -> bool:
+    key = normalize_phrase_key(phrase)
+    if not key:
+        return True
+    store = _load_phrase_store()
+    return key in set(store.get("disabled_auto", []))
+
+
+def disable_auto_phrase(phrase: str) -> None:
+    key = normalize_phrase_key(phrase)
+    if not key:
+        return
+    store = _load_phrase_store()
+    disabled = set(store.get("disabled_auto", []))
+    disabled.add(key)
+    store["disabled_auto"] = sorted(disabled)
+    store["phrases"] = [p for p in store.get("phrases", []) if normalize_phrase_key(p.get("phrase")) != key]
+    _save_phrase_store(store)
+
+
+def enable_auto_phrase(phrase: str) -> None:
+    key = normalize_phrase_key(phrase)
+    if not key:
+        return
+    store = _load_phrase_store()
+    disabled = set(store.get("disabled_auto", []))
+    disabled.discard(key)
+    store["disabled_auto"] = sorted(disabled)
+    _save_phrase_store(store)
+
+
+def register_phrase(phrase: str, meaning: str = "", source: str = "manual", allow_if_disabled: bool = False) -> bool:
+    norm_phrase = re.sub(r"\s+", " ", (phrase or "").strip())
+    key = normalize_phrase_key(norm_phrase)
+    if not key or len(key.split()) < 2:
+        return False
+    store = _load_phrase_store()
+    if not allow_if_disabled and key in set(store.get("disabled_auto", [])):
+        return False
+    if source == "manual":
+        disabled = set(store.get("disabled_auto", []))
+        disabled.discard(key)
+        store["disabled_auto"] = sorted(disabled)
+
+    existing_idx = None
+    for idx, item in enumerate(store.get("phrases", [])):
+        if normalize_phrase_key(item.get("phrase")) == key:
+            existing_idx = idx
+            break
+
+    entry = {
+        "phrase": norm_phrase,
+        "meaning": (meaning or "").strip() or (store["phrases"][existing_idx].get("meaning") if existing_idx is not None else "片語"),
+        "source": source,
+    }
+    if existing_idx is not None:
+        store["phrases"][existing_idx] = entry
+    else:
+        store.setdefault("phrases", []).append(entry)
+    _save_phrase_store(store)
+    return True
+
+
+def delete_phrase_item(phrase: str) -> None:
+    key = normalize_phrase_key(phrase)
+    store = _load_phrase_store()
+    store["phrases"] = [p for p in store.get("phrases", []) if normalize_phrase_key(p.get("phrase")) != key]
+    _save_phrase_store(store)
+
+
+def auto_detect_and_save_phrases(tao_text: str, zh_text: str = "") -> list[str]:
+    """
+    自動辨識句子中的片語組合：
+    1. 若出現如「蘭嶼（pongso no tao）」或「中文（多詞達悟語）」格式，自動記錄為片語。
+    2. 若句子中本身包含已啟用且未停用的多詞片語，亦記錄。
+    """
+    detected = []
+    combined = f"{tao_text or ''} {zh_text or ''}"
+
+    for m in re.finditer(r"([\u4e00-\u9fffA-Za-z0-9'’ʼʻ -]{1,30}?)\s*[（(]\s*([A-Za-z][A-Za-z0-9'’ʼʻ-]*(?:\s+[A-Za-z][A-Za-z0-9'’ʼʻ-]*)+)\s*[）)]", combined):
+        zh_label = m.group(1).strip()
+        tao_phrase = re.sub(r"\s+", " ", m.group(2).strip())
+        if not is_phrase_disabled(tao_phrase):
+            meaning = f"{zh_label}（自動辨識片語）" if zh_label else "自動辨識片語"
+            if register_phrase(tao_phrase, meaning=meaning, source="auto"):
+                detected.append(tao_phrase)
+
+    store = _load_phrase_store()
+    for p_item in store.get("phrases", []):
+        p_str = p_item.get("phrase") or ""
+        p_key = normalize_phrase_key(p_str)
+        if p_key and not is_phrase_disabled(p_str):
+            pattern = re.compile(r"\b" + r"\s+".join(re.escape(w) for w in p_key.split()) + r"\b", flags=re.IGNORECASE)
+            if pattern.search(tao_text or ""):
+                detected.append(p_str)
+
+    return list(dict.fromkeys(detected))
+
+
+def get_active_phrases() -> list[dict]:
+    store = _load_phrase_store()
+    disabled = set(store.get("disabled_auto", []))
+    out = []
+    for p in store.get("phrases", []):
+        key = normalize_phrase_key(p.get("phrase"))
+        if key and key not in disabled:
+            out.append(p)
+    return out
+
+
+def merge_phrases_in_sentence(sentence: str) -> tuple[str, dict[str, dict]]:
+    """
+    將句子中符合已登錄片語的多詞序列合併為單一詞元（以底線連接，如 pongso_no_tao），
+    並回傳 (合併後句子, {合併詞元小寫: 片語資訊})。
+    """
+    s = sentence or ""
+    phrases = sorted(get_active_phrases(), key=lambda x: -len(normalize_phrase_key(x.get("phrase", "")).split()))
+    phrase_meta = {}
+    if not phrases:
+        return s, phrase_meta
+
+    for item in phrases:
+        raw_p = (item.get("phrase") or "").strip()
+        words = [w for w in normalize_phrase_key(raw_p).split() if w]
+        if len(words) < 2:
+            continue
+        merged_token = "_".join(words)
+        phrase_meta[merged_token.lower()] = {
+            "phrase": raw_p,
+            "meaning": item.get("meaning") or "片語",
+            "source": item.get("source") or "manual",
+        }
+        pattern = re.compile(r"\b" + r"\s+".join(re.escape(w) for w in words) + r"\b", flags=re.IGNORECASE)
+        s = pattern.sub(merged_token, s)
+
+    return s, phrase_meta
 
 
 # --- 3. 公開 / 私人語料讀寫函式 ---
@@ -375,6 +635,162 @@ def delete_private_record(item: dict, current_username: str) -> tuple[bool, str]
     return True, "已刪除私人對話紀錄！"
 
 
+def _insert_public_feedback_row(data: dict) -> bool:
+    payload = dict(data)
+    while True:
+        try:
+            supabase.from_("feedback").insert(payload).execute()
+            break
+        except Exception as col_err:
+            err_msg = str(col_err)
+            removed = False
+            if "q_tao" in err_msg and "q_original" not in payload:
+                payload["q_original"] = payload.pop("q_tao")
+                payload["q_trans"] = payload.pop("q_zh", None)
+                removed = True
+            for opt_col in ("is_public", "origin", "input_lang_type"):
+                if opt_col in payload and opt_col in err_msg:
+                    payload.pop(opt_col)
+                    removed = True
+            if not removed:
+                raise
+    build_word_index.clear()
+    load_user_typed_words.clear()
+    load_all_raw_corpus.clear()
+    return True
+
+
+def update_existing_conversation(
+    existing_item: dict,
+    user_info: dict,
+    new_q_tao: str,
+    new_q_zh: str,
+    new_r_tao: str,
+    new_r_zh: str,
+    target_public: bool,
+) -> tuple[bool, str]:
+    """更新先前對話紀錄的文句、翻譯，並支援在公開（feedback）與私人之間切換。"""
+    current_username = user_info["username"]
+    owner_id = existing_item.get("user_id")
+    if current_username != "admin" and owner_id != current_username:
+        return False, "權限不足：您只能編輯自己的對話紀錄！"
+
+    was_private = existing_item.get("_source_table") == "private" or not is_public_feedback(existing_item)
+    new_origin = detect_input_origin(new_q_tao if detect_input_origin(new_q_tao) == "tao" else new_q_zh)
+    ts_val = existing_item.get("timestamp") or datetime.datetime.now().isoformat()
+
+    try:
+        if was_private and not target_public:
+            # 維持私人
+            if existing_item.get("_storage") == PRIVATE_TABLE:
+                supabase.from_(PRIVATE_TABLE).update({
+                    "q_tao": new_q_tao,
+                    "q_zh": new_q_zh,
+                    "tao_text": new_r_tao,
+                    "zh_text": new_r_zh,
+                    "is_edited": 1,
+                    "origin": new_origin,
+                }).eq("id", existing_item.get("id")).eq("user_id", owner_id).execute()
+            else:
+                rows = _load_local_private_rows(owner_id)
+                for r in rows:
+                    if r.get("id") == existing_item.get("id"):
+                        r.update({
+                            "q_tao": new_q_tao,
+                            "q_zh": new_q_zh,
+                            "tao_text": new_r_tao,
+                            "zh_text": new_r_zh,
+                            "is_edited": 1,
+                            "origin": new_origin,
+                        })
+                _save_local_private_rows(owner_id, rows)
+            return True, "已更新私人對話紀錄！"
+
+        if was_private and target_public:
+            # 私人轉公開：寫入 feedback，再移除舊私人紀錄
+            pub_data = {
+                "user_id": owner_id,
+                "user_email": existing_item.get("user_email") or user_info.get("email"),
+                "region": existing_item.get("region") or "",
+                "age_group": existing_item.get("age_group") or "",
+                "gender": existing_item.get("gender") or "",
+                "q_tao": new_q_tao,
+                "q_zh": new_q_zh,
+                "q_audio_data": None,
+                "q_audio_mime": None,
+                "tao_text": new_r_tao,
+                "zh_text": new_r_zh,
+                "r_audio_data": None,
+                "r_audio_mime": None,
+                "is_edited": 1,
+                "error_count": existing_item.get("error_count", 0),
+                "is_public": True,
+                "origin": new_origin,
+                "timestamp": ts_val,
+            }
+            _insert_public_feedback_row(pub_data)
+            delete_private_record(existing_item, current_username)
+            return True, "已更新並改為「公開」存入 feedback！"
+
+        if not was_private and target_public:
+            # 維持公開：更新 feedback
+            fb_id = existing_item.get("id")
+            upd_payload = {
+                "q_tao": new_q_tao,
+                "q_zh": new_q_zh,
+                "tao_text": new_r_tao,
+                "zh_text": new_r_zh,
+                "is_edited": 1,
+                "is_public": True,
+                "origin": new_origin,
+            }
+            while True:
+                try:
+                    supabase.from_("feedback").update(upd_payload).eq("id", fb_id).execute()
+                    break
+                except Exception as col_err:
+                    err_msg = str(col_err)
+                    removed = False
+                    if "q_tao" in err_msg and "q_original" not in upd_payload:
+                        upd_payload["q_original"] = upd_payload.pop("q_tao")
+                        upd_payload["q_trans"] = upd_payload.pop("q_zh", None)
+                        removed = True
+                    for opt_col in ("is_public", "origin"):
+                        if opt_col in upd_payload and opt_col in err_msg:
+                            upd_payload.pop(opt_col)
+                            removed = True
+                    if not removed:
+                        raise
+            build_word_index.clear()
+            load_user_typed_words.clear()
+            load_all_raw_corpus.clear()
+            return True, "已更新公開對話紀錄！"
+
+        # 公開轉私人：寫入私人儲存區，並從 feedback 刪除舊筆
+        priv_data = {
+            "user_id": owner_id,
+            "user_email": existing_item.get("user_email") or user_info.get("email"),
+            "region": existing_item.get("region") or "",
+            "age_group": existing_item.get("age_group") or "",
+            "gender": existing_item.get("gender") or "",
+            "q_tao": new_q_tao,
+            "q_zh": new_q_zh,
+            "tao_text": new_r_tao,
+            "zh_text": new_r_zh,
+            "is_edited": 1,
+            "error_count": existing_item.get("error_count", 0),
+            "origin": new_origin,
+            "timestamp": ts_val,
+        }
+        save_private_record(priv_data)
+        ok_del, msg_del = delete_feedback_item(existing_item.get("id"), current_username)
+        if not ok_del:
+            return False, f"已存為私人，但移除舊公開紀錄失敗：{msg_del}"
+        return True, "已更新並改為「私人」（已從 feedback 移除）！"
+    except Exception as e:
+        return False, f"更新失敗：{e}"
+
+
 def save_語料_to_supabase(
     user_info,
     bg_info,
@@ -394,6 +810,8 @@ def save_語料_to_supabase(
         region_str = ", ".join(region_val) if isinstance(region_val, list) else region_val
         input_origin = origin or detect_input_origin(q_tao if origin == "tao" else q_zh)
         now_iso = datetime.datetime.now().isoformat()
+
+        auto_detect_and_save_phrases(f"{q_tao or ''} {r_tao or ''}", f"{q_zh or ''} {r_zh or ''}")
 
         # 若選擇「私人」（is_public=False），直接存進個人/私人儲存區，不寫入 feedback 表
         if not bool(is_public):
@@ -435,40 +853,22 @@ def save_語料_to_supabase(
             "timestamp": now_iso,
         }
 
-        payload = dict(data)
-        while True:
-            try:
-                res_ins = supabase.from_("feedback").insert(payload).execute()
-                break
-            except Exception as col_err:
-                err_msg = str(col_err)
-                removed = False
-                if "q_tao" in err_msg and "q_original" not in payload:
-                    payload["q_original"] = payload.pop("q_tao")
-                    payload["q_trans"] = payload.pop("q_zh", None)
-                    removed = True
-                for opt_col in ("is_public", "origin", "input_lang_type"):
-                    if opt_col in payload and opt_col in err_msg:
-                        payload.pop(opt_col)
-                        removed = True
-                if not removed:
-                    raise
+        _insert_public_feedback_row(data)
 
-        build_word_index.clear()
-        load_user_typed_words.clear()
-        load_all_raw_corpus.clear()
-
-        if edit_record and is_edited and res_ins.data:
+        if edit_record and is_edited:
             try:
+                res_latest = supabase.from_("feedback").select("id").eq("user_id", user_info["username"]).order("id", desc=True).limit(1).execute()
+                fb_new_id = res_latest.data[0].get("id") if res_latest.data else None
                 supabase.from_("sentence_edits").insert(
-                    {**edit_record, "feedback_id": res_ins.data[0].get("id"), "user_id": user_info["username"]}
+                    {**edit_record, "feedback_id": fb_new_id, "user_id": user_info["username"]}
                 ).execute()
             except Exception as edit_err:
                 st.toast(f"修改前的原句未能保存（請建立 sentence_edits 資料表）：{edit_err}", icon="⚠️")
 
-        if pending_sentence_id and not is_edited and res_ins.data:
+        if pending_sentence_id and not is_edited:
             try:
-                new_id = res_ins.data[0].get("id")
+                res_latest = supabase.from_("feedback").select("id").eq("user_id", user_info["username"]).order("id", desc=True).limit(1).execute()
+                new_id = res_latest.data[0].get("id") if res_latest.data else None
                 if new_id:
                     supabase.from_("community_votes").update({"feedback_id": new_id}).eq(
                         "feedback_id", 0
@@ -1390,6 +1790,7 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
+    merged_sentence, phrase_meta = merge_phrases_in_sentence(sentence or "")
     word_index = build_word_index()
     vote_data = load_vote_data()
     notes = load_word_notes()
@@ -1402,13 +1803,28 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
     my_votes = load_user_votes(current_user) if (enable_word_voting and current_user) else set()
 
     with st.container(key=f"sent_{key_prefix}"):
-        for idx, token in enumerate((sentence or "").split()):
+        for idx, token in enumerate(merged_sentence.split()):
             lead, w, trail = split_token(token)
             if lead:
                 _plain(lead, "tao-lead")
 
             if w:
                 clean_w = normalize_word(w)
+                p_info = phrase_meta.get(clean_w)
+                if p_info:
+                    with st.popover(w, key=f"{key_prefix}_phr_{idx}"):
+                        st.markdown(f"### 🧩 片語詳情: **{p_info['phrase']}**")
+                        st.markdown(f"- **片語說明**: {p_info['meaning']}")
+                        st.markdown(f"- **來源**: {'自動辨識' if p_info['source'] == 'auto' else '手動登錄'}")
+                        if current_user and p_info["source"] == "auto":
+                            if st.button("🚫 取消此組合的自動登錄", key=f"btn_dis_phr_{key_prefix}_{idx}"):
+                                disable_auto_phrase(p_info["phrase"])
+                                st.success(f"已取消「{p_info['phrase']}」的自動登錄。")
+                                st.rerun()
+                    if trail:
+                        _plain(trail, "tao-punct")
+                    continue
+
                 info = word_index.get(clean_w, {})
                 occ_count = info.get("count", 0)
                 in_user_raw = clean_w in raw_user_words
@@ -1692,7 +2108,7 @@ def process_ai_input(text_prompt=None):
                 result["ai_reply_tao"] = lower_first_char(result["ai_reply_tao"])
             if "is_ai_generated" not in result:
                 result["is_ai_generated"] = False
-            
+
             if not isinstance(result.get("etymology"), dict):
                 result["etymology"] = {}
             if not isinstance(result.get("new_words"), dict):
@@ -1736,6 +2152,7 @@ with st.sidebar:
             login_username = st.text_input("帳號輸入框", label_visibility="collapsed")
             st.markdown(dual_text("kagi", "密碼"), unsafe_allow_html=True)
             login_password = st.text_input("密碼輸入框", type="password", label_visibility="collapsed")
+            remember_me = st.checkbox("🔒 在此裝置記住帳號（下次自動登入）", value=True, key="remember_login_cb")
             if st.button("somdep 登入"):
                 res = login_user(login_username, login_password)
                 if res:
@@ -1746,6 +2163,10 @@ with st.sidebar:
                         "age_group": res[0]["age_group"],
                         "gender": res[0]["gender"],
                     }
+                    if remember_me:
+                        issue_auto_login(res[0]["username"])
+                    else:
+                        clear_auto_login(res[0]["username"])
                     st.rerun()
                 else:
                     st.error("帳號或密碼錯誤。")
@@ -1756,7 +2177,7 @@ with st.sidebar:
             new_p = st.text_input("設定密碼輸入框", type="password", label_visibility="collapsed")
             st.markdown(dual_text("ivoka no teygami", "信箱"), unsafe_allow_html=True)
             new_e = st.text_input("信箱輸入框", label_visibility="collapsed")
-            
+
             st.markdown(dual_text("ili", "部落 (可複選)"), unsafe_allow_html=True)
             new_r = st.multiselect("部落選擇", REGION_OPTIONS, default=["Jiyayo 椰油"], label_visibility="collapsed")
             st.markdown(dual_text("kakawakawan", "年齡"), unsafe_allow_html=True)
@@ -1774,30 +2195,32 @@ with st.sidebar:
         u = st.session_state.user_info
         st.success(f"ngaran 登入身分：**{u['username']}**")
         if st.button("makowbot 🚪 登出"):
+            clear_auto_login(u["username"])
             st.session_state.user_info = None
             st.rerun()
+
 
 # --- 8. 主頁面區塊 ---
 main_menu = st.radio(
     "",
     [
-        "miAI ko / 我要用AI", 
-        "manita so tao a miAI / 看別人用AI", 
-        "amian so AI ori / 關於本站"
+        "miAI ko / 我要用AI",
+        "manita so tao a miAI / 看別人用AI",
+        "amian so AI ori / 關於本站",
     ],
     horizontal=True,
 )
 
 if main_menu == "miAI ko / 我要用AI":
     st.markdown(
-        dual_text("macisirisiring do AI kano misinsinmo so vakong no AI", "演算法與 AI 備援對話語料採集", is_title=True), 
-        unsafe_allow_html=True
+        dual_text("macisirisiring do AI kano misinsinmo so vakong no AI", "演算法與 AI 備援對話語料採集", is_title=True),
+        unsafe_allow_html=True,
     )
     if st.session_state.user_info is None:
         st.warning("🔒 本系統需登入後使用，請先在左側邊欄登入。")
     else:
         user = st.session_state.user_info
-        
+
         saved_region = user["region"]
         if isinstance(saved_region, str):
             user_regions = [r.strip() for r in saved_region.split(",")]
@@ -1822,7 +2245,7 @@ if main_menu == "miAI ko / 我要用AI":
         st.divider()
 
         st.markdown(dual_text("mivatvatek", "請輸入文字"), unsafe_allow_html=True)
-        text_input = st.text_input("text_input_box", placeholder="例如：Akokay / 今天天氣如何？", label_visibility="collapsed")
+        text_input = st.text_input("text_input_box", placeholder="例如：Akokay / 蘭嶼（pongso no tao）", label_visibility="collapsed")
         if st.button("itoro 發送查詢（演算法優先）"):
             if text_input.strip():
                 with st.spinner("⏳ 演算法檢索與備援處理中..."):
@@ -1843,6 +2266,11 @@ if main_menu == "miAI ko / 我要用AI":
                                     ety[new] = ety[old]
                             ai_data["etymology"] = ety
                             ai_data["spelling_swaps"] = swaps
+
+                        auto_detect_and_save_phrases(
+                            f"{text_input} {ai_data.get('user_recognized_tao', '')} {ai_data.get('ai_reply_tao', '')}",
+                            f"{ai_data.get('user_translation', '')} {ai_data.get('ai_reply_zh', '')}",
+                        )
                         st.session_state.ai_data = ai_data
                         st.session_state.active_bg = current_bg
 
@@ -1878,15 +2306,15 @@ if main_menu == "miAI ko / 我要用AI":
 
             st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊有螢光標籤的單字查看說明與投票)")
             render_interactive_sentence(
-                ai_data.get("ai_reply_tao", ""), 
-                is_ai_generated=is_ai, 
-                user_accepted=False, 
+                ai_data.get("ai_reply_tao", ""),
+                is_ai_generated=is_ai,
+                user_accepted=False,
                 etymology_map=ai_data.get("etymology", {}),
                 key_prefix="main_reply",
                 enable_word_voting=True,
                 current_user=st.session_state.user_info["username"],
                 user_input_text=q_orig,
-                sentence_id=ai_data.get("sentence_id")
+                sentence_id=ai_data.get("sentence_id"),
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
             if ai_data.get("spelling_swaps"):
@@ -1902,7 +2330,7 @@ if main_menu == "miAI ko / 我要用AI":
                     <div style="font-size: 16px; font-weight: bold; margin-top: 5px;">{user_profile_str}</div>
                 </div>
                 """,
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
             st.divider()
@@ -1923,7 +2351,7 @@ if main_menu == "miAI ko / 我要用AI":
                 "eval_choice_radio",
                 ["apiya / 正確 (直接採納)", "beken / 錯誤 (我要修改)"],
                 horizontal=True,
-                label_visibility="collapsed"
+                label_visibility="collapsed",
             )
 
             if "apiya" in eval_choice:
@@ -1991,7 +2419,56 @@ if main_menu == "miAI ko / 我要用AI":
                         del st.session_state.ai_data
                         st.rerun()
 
-        # --- 使用者自己的歷史對話紀錄（含 feedback 與個人私人紀錄） ---
+        # --- 片語辨識與管理區塊 ---
+        st.divider()
+        with st.expander("🧩 片語辨識與管理（自動擷取／手動登錄／取消自動登錄）"):
+            st.caption("當文字中出現如「蘭嶼（pongso no tao）」的多詞組合時，系統會自動記錄為片語；您也可以手動登錄或取消自動登錄。")
+            p_col1, p_col2 = st.columns([2, 2])
+            with p_col1:
+                new_phrase_str = st.text_input("登錄片語（至少 2 個詞，例如：pongso no tao）", key="manual_phrase_input")
+            with p_col2:
+                new_phrase_meaning = st.text_input("片語中文或說明（例如：蘭嶼）", key="manual_phrase_meaning_input")
+            if st.button("➕ 手動登錄為片語", key="btn_add_manual_phrase"):
+                if register_phrase(new_phrase_str, meaning=new_phrase_meaning, source="manual"):
+                    st.success(f"已登錄片語「{new_phrase_str.strip()}」！")
+                    st.rerun()
+                else:
+                    st.warning("請輸入至少包含兩個詞彙的片語。")
+
+            p_store = _load_phrase_store()
+            active_p_list = get_active_phrases()
+            st.markdown("**目前生效的片語：**")
+            if not active_p_list:
+                st.caption("目前尚無生效片語。")
+            else:
+                for p_idx, p_item in enumerate(active_p_list):
+                    p_name = p_item.get("phrase", "")
+                    p_src = "自動辨識" if p_item.get("source") == "auto" else "手動登錄"
+                    c_info, c_act1, c_act2 = st.columns([4, 1.5, 1.5])
+                    with c_info:
+                        st.markdown(f"- **{p_name}** — {p_item.get('meaning', '')} `({p_src})`")
+                    with c_act1:
+                        if st.button("🚫 取消自動登錄", key=f"dis_auto_p_{p_idx}"):
+                            disable_auto_phrase(p_name)
+                            st.rerun()
+                    with c_act2:
+                        if st.button("🗑️ 移除", key=f"del_p_{p_idx}"):
+                            delete_phrase_item(p_name)
+                            st.rerun()
+
+            disabled_list = p_store.get("disabled_auto", [])
+            if disabled_list:
+                st.markdown("**已取消自動登錄的組合：**")
+                for d_idx, d_key in enumerate(disabled_list):
+                    dc1, dc2 = st.columns([5, 1.5])
+                    with dc1:
+                        st.caption(f"- {d_key}")
+                    with dc2:
+                        if st.button("↩️ 恢復自動辨識", key=f"en_auto_p_{d_idx}"):
+                            enable_auto_phrase(d_key)
+                            st.rerun()
+
+        # --- 使用者自己的歷史對話紀錄（含編輯、公開/私人切換、刪除） ---
         st.divider()
         st.markdown(dual_text("no ciriciring mo a nimareng", "我的歷史對話紀錄", is_title=True), unsafe_allow_html=True)
         try:
@@ -2024,20 +2501,55 @@ if main_menu == "miAI ko / 我要用AI":
                     pub_badge = "🔒 私人" if is_priv else "🌐 公開"
                     q_tao_val = get_fb_q_tao(item)
                     q_zh_val = get_fb_q_zh(item)
+                    r_tao_val = item.get("tao_text") or ""
+                    r_zh_val = item.get("zh_text") or ""
                     item_origin = item.get("origin") or detect_input_origin(q_tao_val)
                     ts_str = str(item.get("timestamp") or "")[:19].replace("T", " ")
+                    row_uid = f"{item.get('_source_table')}_{item_id}_{idx_h}"
+
                     with st.expander(f"💬 #{item_id}｜{pub_badge}｜origin: {item_origin}｜{ts_str}｜{q_tao_val}"):
                         st.markdown(f"**問 (q_tao)**：{q_tao_val}")
                         if q_zh_val:
                             st.caption(f"翻譯 (q_zh)：{q_zh_val}")
-                        st.markdown(f"**答 (tao_text)**：{item.get('tao_text') or ''}")
-                        if item.get("zh_text"):
-                            st.caption(f"回應翻譯 (zh_text)：{item.get('zh_text')}")
+                        st.markdown(f"**答 (tao_text)**：{r_tao_val}")
+                        if r_zh_val:
+                            st.caption(f"回應翻譯 (zh_text)：{r_zh_val}")
                         st.caption(
                             f"狀態：{pub_badge}｜原始語言 (origin)：{item_origin}｜"
                             f"部落：{item.get('region') or ''}｜年齡：{item.get('age_group') or ''}｜性別：{item.get('gender') or ''}"
                         )
-                        if st.button(f"🗑️ 刪除此筆對話 (#{item_id})", key=f"del_my_fb_{item.get('_source_table')}_{item_id}_{idx_h}"):
+
+                        with st.popover("✏️ 編輯文句、翻譯或公開／私人", key=f"pop_edit_{row_uid}"):
+                            st.markdown("#### 編輯此筆對話紀錄")
+                            ed_q_tao = st.text_input("問題文句（達悟語／原句）", value=q_tao_val, key=f"ed_qt_{row_uid}")
+                            ed_q_zh = st.text_input("問題翻譯", value=q_zh_val, key=f"ed_qz_{row_uid}")
+                            ed_r_tao = st.text_input("回應文句（達悟語）", value=r_tao_val, key=f"ed_rt_{row_uid}")
+                            ed_r_zh = st.text_input("回應翻譯", value=r_zh_val, key=f"ed_rz_{row_uid}")
+                            ed_vis = st.radio(
+                                "公開狀態：",
+                                ["🌐 公開", "🔒 私人"],
+                                index=1 if is_priv else 0,
+                                horizontal=True,
+                                key=f"ed_vis_{row_uid}",
+                            )
+                            if st.button("💾 儲存修改", key=f"btn_save_ed_{row_uid}"):
+                                auto_detect_and_save_phrases(f"{ed_q_tao} {ed_r_tao}", f"{ed_q_zh} {ed_r_zh}")
+                                ok_upd, msg_upd = update_existing_conversation(
+                                    existing_item=item,
+                                    user_info=user,
+                                    new_q_tao=canon_apostrophes(ed_q_tao.strip()),
+                                    new_q_zh=ed_q_zh.strip(),
+                                    new_r_tao=canon_apostrophes(ed_r_tao.strip()),
+                                    new_r_zh=ed_r_zh.strip(),
+                                    target_public=ed_vis.startswith("🌐"),
+                                )
+                                if ok_upd:
+                                    st.success(msg_upd)
+                                    st.rerun()
+                                else:
+                                    st.error(msg_upd)
+
+                        if st.button(f"🗑️ 刪除此筆對話 (#{item_id})", key=f"del_my_fb_{row_uid}"):
                             if is_priv:
                                 ok_del, msg_del = delete_private_record(item, user["username"])
                             else:
@@ -2052,8 +2564,8 @@ if main_menu == "miAI ko / 我要用AI":
 
 elif main_menu == "manita so tao a miAI / 看別人用AI":
     st.markdown(
-        dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與單字用法投票", is_title=True), 
-        unsafe_allow_html=True
+        dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與單字用法投票", is_title=True),
+        unsafe_allow_html=True,
     )
     with st.expander("🧪 語料庫檢索狀態（檢查標註是否正確）"):
         try:
@@ -2188,9 +2700,9 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{q_zh_val}</div>", unsafe_allow_html=True)
 
                     st.markdown("##### tovis (答 - 點擊有螢光標籤的單字即可查看說明與投票)")
-                    
+
                     render_interactive_sentence(
-                        fb.get('tao_text', ''),
+                        fb.get("tao_text", ""),
                         is_ai_generated=False,
                         user_accepted=True,
                         key_prefix=f"fb_{fb_id}",
@@ -2207,7 +2719,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             <b>o pakatotoan (背景):</b> {fb.get('region')} | {fb.get('age_group')} | {fb.get('gender')} | <b>origin:</b> {fb_origin}
                         </div>
                         """,
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
                     )
 
     except Exception as e:
