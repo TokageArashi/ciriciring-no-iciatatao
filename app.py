@@ -1004,7 +1004,11 @@ def save_語料_to_supabase(
                     load_user_votes.clear()
             except Exception:
                 pass
-        
+
+        return True
+    except Exception as e:
+        st.error(f"儲存失敗：{e}")
+        return False
 
 
 def delete_feedback_item(feedback_id, current_username):
