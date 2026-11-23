@@ -986,17 +986,25 @@ def save_語料_to_supabase(
                 res_latest = supabase.from_("feedback").select("id").eq("user_id", user_info["username"]).order("id", desc=True).limit(1).execute()
                 new_id = res_latest.data[0].get("id") if res_latest.data else None
                 if new_id:
-                    supabase.from_("community_votes").update({"feedback_id": new_id}).eq(
-                        "feedback_id", 0
+                    supabase.from_("community_votes").update({"feedback_id": new_id}).is_(
+                        "feedback_id", "null"
                     ).like("hidden_suggestion", f"%sent:{pending_sentence_id}%").execute()
+
+                    remaining_pending = []
+                    for pv in st.session_state.get("pending_session_votes", []):
+                        if pv.get("sentence_id") == pending_sentence_id:
+                            row_to_insert = dict(pv["payload"])
+                            row_to_insert["feedback_id"] = new_id
+                            supabase.from_("community_votes").insert(row_to_insert).execute()
+                        else:
+                            remaining_pending.append(pv)
+                    st.session_state["pending_session_votes"] = remaining_pending
+
                     load_vote_data.clear()
                     load_user_votes.clear()
             except Exception:
                 pass
-        return True
-    except Exception as e:
-        st.error(f"儲存失敗：{e}")
-        return False
+        
 
 
 def delete_feedback_item(feedback_id, current_username):
@@ -1976,8 +1984,8 @@ def _submit_variant_vote(
     sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
     suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
 
-    supabase.from_("community_votes").insert({
-        "feedback_id": fb_id if fb_id else 0,
+    vote_payload = {
+        "feedback_id": int(fb_id) if fb_id else None,
         "voter_id": current_user,
         "region": voter_region_str,
         "age_group": voter_info.get("age_group", "未知"),
@@ -1985,7 +1993,21 @@ def _submit_variant_vote(
         "vote_result": "贊同" if pick == clean_w else "不贊同",
         "hidden_suggestion": suggestion_content,
         "timestamp": datetime.datetime.now().isoformat(),
-    }).execute()
+    }
+
+    try:
+        supabase.from_("community_votes").insert(vote_payload).execute()
+    except Exception as fk_err:
+        # 若資料庫欄位仍設為 NOT NULL 且不允許 None，則暫存於 session_state，待句子存入 feedback 後再補寫
+        if "null value in column" in str(fk_err).lower() or "23502" in str(fk_err):
+            pending_list = st.session_state.setdefault("pending_session_votes", [])
+            pending_list.append({
+                "sentence_id": sentence_id,
+                "payload": vote_payload,
+            })
+        else:
+            raise
+
     load_vote_data.clear()
     load_user_votes.clear()
     return True, f"🎉 已投給「{pick}」！"
