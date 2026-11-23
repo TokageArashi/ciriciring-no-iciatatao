@@ -99,6 +99,7 @@ PRIVATE_TABLE = "private_feedback"
 LOCAL_PRIVATE_DIR = ".private_user_logs"
 PHRASE_STORE_FILE = ".phrases_store.json"
 AUTO_LOGIN_FILE = ".auto_login_tokens.json"
+WORD_DETAIL_STORE_FILE = ".word_details_store.json"
 
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
@@ -110,8 +111,10 @@ if "local_private_cache" not in st.session_state:
     st.session_state.local_private_cache = {}
 if "auto_login_checked" not in st.session_state:
     st.session_state.auto_login_checked = False
+if "per_sentence_disabled_phrases" not in st.session_state:
+    st.session_state.per_sentence_disabled_phrases = {}
 
-# 自動關閉拼字檢查
+# 自動關閉拼字檢查 + 片語滑鼠懸停同步黑底線
 components.html(
     """
     <script>
@@ -124,8 +127,33 @@ components.html(
                 input.setAttribute('autocapitalize', 'off');
             });
         }
+
+        function bindPhraseHoverUnderline() {
+            const doc = parent.document;
+            const phraseEls = doc.querySelectorAll('[data-phrase-group]');
+            phraseEls.forEach(el => {
+                if (el.dataset.phraseHoverBound === '1') return;
+                el.dataset.phraseHoverBound = '1';
+                const grp = el.getAttribute('data-phrase-group');
+                el.addEventListener('mouseenter', () => {
+                    doc.querySelectorAll(`[data-phrase-group="${grp}"]`).forEach(target => {
+                        target.classList.add('phrase-hover-active');
+                    });
+                });
+                el.addEventListener('mouseleave', () => {
+                    doc.querySelectorAll(`[data-phrase-group="${grp}"]`).forEach(target => {
+                        target.classList.remove('phrase-hover-active');
+                    });
+                });
+            });
+        }
+
         disableSpellcheck();
-        const observer = new MutationObserver(() => disableSpellcheck());
+        bindPhraseHoverUnderline();
+        const observer = new MutationObserver(() => {
+            disableSpellcheck();
+            bindPhraseHoverUnderline();
+        });
         observer.observe(parent.document.body, { childList: true, subtree: true });
     </script>
     """,
@@ -160,6 +188,30 @@ st.markdown(
     :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]) [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
     .tao-w, .tao-punct, .tao-lead { font-size: 20px; font-weight: bold; line-height: 2.0; }
 
+    /* 黑色一般詞彙也可點擊查看單字詳情 */
+    [class*="_hlK_"] button {
+        border: none !important;
+        box-shadow: none !important;
+        background-color: transparent !important;
+        color: inherit !important;
+        height: auto !important;
+        min-height: unset !important;
+        padding: 0 0.15em !important;
+        line-height: 1.6 !important;
+        font-size: 20px !important;
+        font-weight: bold !important;
+        border-radius: 4px !important;
+        cursor: pointer;
+    }
+    [class*="_hlK_"] button p { font-size: 20px !important; margin: 0 !important; }
+    [class*="_hlK_"] button svg, [class*="_hlK_"] button [data-testid="stIconMaterial"] { display: none !important; }
+    [class*="_hlK_"] button:hover {
+        background-color: rgba(17, 24, 39, 0.08) !important;
+        text-decoration: underline solid #111827 2px;
+        text-underline-offset: 4px;
+    }
+
+    /* 黃色／紅色詞彙按鈕樣式 */
     [class*="_hlY_"] button, [class*="_hlR_"] button {
         border: none !important;
         box-shadow: none !important;
@@ -180,6 +232,14 @@ st.markdown(
     [class*="_hlY_"] button:hover { background-color: rgba(250, 204, 21, 0.85) !important; }
     [class*="_hlR_"] button { background-color: rgba(239, 68, 68, 0.50) !important; }
     [class*="_hlR_"] button:hover { background-color: rgba(239, 68, 68, 0.80) !important; }
+
+    /* 片語滑鼠懸停時組合中各字一起出現黑底線 */
+    .phrase-hover-active,
+    .phrase-hover-active button,
+    :is([class*="_hlY_"], [class*="_hlR_"], [class*="_hlK_"]):has([data-phrase-group].phrase-hover-active) button {
+        text-decoration: underline solid #111827 2.5px !important;
+        text-underline-offset: 4px !important;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -323,26 +383,100 @@ def login_user(username, password):
 try_auto_login_from_device()
 
 
-# --- 2.5 片語辨識與管理 ---
+# --- 2.5 單字／片語詳情儲存與片語辨識 ---
+ETYMOLOGY_OPTIONS = ["固有詞", "新造詞", "音譯"]
+
 DEFAULT_AUTO_PHRASES = [
     {"phrase": "pongso no tao", "meaning": "蘭嶼（人之島）", "source": "auto"},
 ]
 
 
+def _load_word_details_store() -> dict:
+    if os.path.exists(WORD_DETAIL_STORE_FILE):
+        try:
+            with open(WORD_DETAIL_STORE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+
+def _save_word_details_store(store: dict) -> None:
+    try:
+        with open(WORD_DETAIL_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_word_detail_record(key: str) -> dict:
+    """
+    取得單字／片語的詳情紀錄：
+    - pipipangayan：預設保留空白（""），讓使用者自行編輯
+    - explanation：中文解釋
+    - origin_type：固有詞 / 新造詞 / 音譯
+    - root_combo：詞根組合（固有詞為選填、新造詞為必填）
+    - loan_lang：何種語言（音譯時必填）
+    """
+    k = (key or "").strip().lower()
+    store = _load_word_details_store()
+    rec = store.get(k) or {}
+    return {
+        "pipipangayan": rec.get("pipipangayan", ""),
+        "explanation": rec.get("explanation", ""),
+        "origin_type": rec.get("origin_type", "固有詞"),
+        "root_combo": rec.get("root_combo", ""),
+        "loan_lang": rec.get("loan_lang", ""),
+        "editor": rec.get("editor", ""),
+        "updated_at": rec.get("updated_at", ""),
+    }
+
+
+def save_word_detail_record(
+    key: str,
+    pipipangayan: str,
+    explanation: str,
+    origin_type: str,
+    root_combo: str,
+    loan_lang: str,
+    editor: str,
+) -> tuple[bool, str]:
+    k = (key or "").strip().lower()
+    if not k:
+        return False, "詞彙鍵值無效。"
+    if origin_type not in ETYMOLOGY_OPTIONS:
+        return False, "語源僅可選擇：固有詞、新造詞、音譯。"
+    if origin_type == "新造詞" and not (root_combo or "").strip():
+        return False, "選擇「新造詞」時，詞根組合為必填欄位。"
+    if origin_type == "音譯" and not (loan_lang or "").strip():
+        return False, "選擇「音譯」時，何種語言為必填欄位。"
+
+    store = _load_word_details_store()
+    store[k] = {
+        "pipipangayan": (pipipangayan or "").strip(),
+        "explanation": (explanation or "").strip(),
+        "origin_type": origin_type,
+        "root_combo": (root_combo or "").strip(),
+        "loan_lang": (loan_lang or "").strip(),
+        "editor": editor,
+        "updated_at": datetime.datetime.now().isoformat(),
+    }
+    _save_word_details_store(store)
+    return True, "已儲存單字詳情！"
+
+
 def _load_phrase_store() -> dict:
     store = {
         "phrases": list(DEFAULT_AUTO_PHRASES),
-        "disabled_auto": [],
     }
     if os.path.exists(PHRASE_STORE_FILE):
         try:
             with open(PHRASE_STORE_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-                if isinstance(raw, dict):
-                    if isinstance(raw.get("phrases"), list):
-                        store["phrases"] = raw["phrases"]
-                    if isinstance(raw.get("disabled_auto"), list):
-                        store["disabled_auto"] = [str(x).lower().strip() for x in raw["disabled_auto"] if str(x).strip()]
+                if isinstance(raw, dict) and isinstance(raw.get("phrases"), list):
+                    store["phrases"] = raw["phrases"]
         except Exception:
             pass
     return store
@@ -357,54 +491,35 @@ def _save_phrase_store(store: dict) -> None:
 
 
 def normalize_phrase_key(phrase: str) -> str:
-    cleaned = re.sub(r"\s+", " ", (phrase or "").strip().lower())
-    return cleaned
+    return re.sub(r"\s+", " ", (phrase or "").strip().lower())
 
 
-def is_phrase_disabled(phrase: str) -> bool:
-    key = normalize_phrase_key(phrase)
-    if not key:
-        return True
-    store = _load_phrase_store()
-    return key in set(store.get("disabled_auto", []))
+def is_phrase_disabled_in_sentence(sentence_key_id: str | None, phrase: str) -> bool:
+    if not sentence_key_id or not phrase:
+        return False
+    p_key = normalize_phrase_key(phrase)
+    disabled_map = st.session_state.per_sentence_disabled_phrases
+    return p_key in set(disabled_map.get(sentence_key_id, []))
 
 
-def disable_auto_phrase(phrase: str) -> None:
-    key = normalize_phrase_key(phrase)
-    if not key:
+def cancel_phrase_in_sentence(sentence_key_id: str | None, phrase: str) -> None:
+    """僅取消該句子中的片語組合，不會刪除其他句子或全域登錄的片語組合。"""
+    if not sentence_key_id or not phrase:
         return
-    store = _load_phrase_store()
-    disabled = set(store.get("disabled_auto", []))
-    disabled.add(key)
-    store["disabled_auto"] = sorted(disabled)
-    store["phrases"] = [p for p in store.get("phrases", []) if normalize_phrase_key(p.get("phrase")) != key]
-    _save_phrase_store(store)
+    p_key = normalize_phrase_key(phrase)
+    disabled_map = st.session_state.per_sentence_disabled_phrases
+    s_set = set(disabled_map.get(sentence_key_id, []))
+    s_set.add(p_key)
+    disabled_map[sentence_key_id] = sorted(s_set)
 
 
-def enable_auto_phrase(phrase: str) -> None:
-    key = normalize_phrase_key(phrase)
-    if not key:
-        return
-    store = _load_phrase_store()
-    disabled = set(store.get("disabled_auto", []))
-    disabled.discard(key)
-    store["disabled_auto"] = sorted(disabled)
-    _save_phrase_store(store)
-
-
-def register_phrase(phrase: str, meaning: str = "", source: str = "manual", allow_if_disabled: bool = False) -> bool:
+def register_phrase(phrase: str, meaning: str = "", source: str = "manual") -> bool:
     norm_phrase = re.sub(r"\s+", " ", (phrase or "").strip())
     key = normalize_phrase_key(norm_phrase)
     if not key or len(key.split()) < 2:
         return False
-    store = _load_phrase_store()
-    if not allow_if_disabled and key in set(store.get("disabled_auto", [])):
-        return False
-    if source == "manual":
-        disabled = set(store.get("disabled_auto", []))
-        disabled.discard(key)
-        store["disabled_auto"] = sorted(disabled)
 
+    store = _load_phrase_store()
     existing_idx = None
     for idx, item in enumerate(store.get("phrases", [])):
         if normalize_phrase_key(item.get("phrase")) == key:
@@ -421,21 +536,28 @@ def register_phrase(phrase: str, meaning: str = "", source: str = "manual", allo
     else:
         store.setdefault("phrases", []).append(entry)
     _save_phrase_store(store)
+
+    # 若有初始中文解釋，同步寫入單字詳情（不覆蓋使用者既有 pipipangayan 與解釋）
+    if entry["meaning"]:
+        detail_store = _load_word_details_store()
+        merged_key = "_".join(key.split())
+        if merged_key not in detail_store or not detail_store[merged_key].get("explanation"):
+            cur = detail_store.get(merged_key, {})
+            cur["explanation"] = cur.get("explanation") or entry["meaning"]
+            cur.setdefault("pipipangayan", "")
+            cur.setdefault("origin_type", "固有詞")
+            cur.setdefault("root_combo", "")
+            cur.setdefault("loan_lang", "")
+            detail_store[merged_key] = cur
+            _save_word_details_store(detail_store)
     return True
-
-
-def delete_phrase_item(phrase: str) -> None:
-    key = normalize_phrase_key(phrase)
-    store = _load_phrase_store()
-    store["phrases"] = [p for p in store.get("phrases", []) if normalize_phrase_key(p.get("phrase")) != key]
-    _save_phrase_store(store)
 
 
 def auto_detect_and_save_phrases(tao_text: str, zh_text: str = "") -> list[str]:
     """
     自動辨識句子中的片語組合：
-    1. 若出現如「蘭嶼（pongso no tao）」或「中文（多詞達悟語）」格式，自動記錄為片語。
-    2. 若句子中本身包含已啟用且未停用的多詞片語，亦記錄。
+    1. 出現如「蘭嶼（pongso no tao）」或「中文（多詞達悟語）」格式時，自動記錄為片語。
+    2. 若句子中本身包含已登錄的多詞片語，亦記錄。
     """
     detected = []
     combined = f"{tao_text or ''} {zh_text or ''}"
@@ -443,16 +565,15 @@ def auto_detect_and_save_phrases(tao_text: str, zh_text: str = "") -> list[str]:
     for m in re.finditer(r"([\u4e00-\u9fffA-Za-z0-9'’ʼʻ -]{1,30}?)\s*[（(]\s*([A-Za-z][A-Za-z0-9'’ʼʻ-]*(?:\s+[A-Za-z][A-Za-z0-9'’ʼʻ-]*)+)\s*[）)]", combined):
         zh_label = m.group(1).strip()
         tao_phrase = re.sub(r"\s+", " ", m.group(2).strip())
-        if not is_phrase_disabled(tao_phrase):
-            meaning = f"{zh_label}（自動辨識片語）" if zh_label else "自動辨識片語"
-            if register_phrase(tao_phrase, meaning=meaning, source="auto"):
-                detected.append(tao_phrase)
+        meaning = f"{zh_label}（自動辨識片語）" if zh_label else "自動辨識片語"
+        if register_phrase(tao_phrase, meaning=meaning, source="auto"):
+            detected.append(tao_phrase)
 
     store = _load_phrase_store()
     for p_item in store.get("phrases", []):
         p_str = p_item.get("phrase") or ""
         p_key = normalize_phrase_key(p_str)
-        if p_key and not is_phrase_disabled(p_str):
+        if p_key:
             pattern = re.compile(r"\b" + r"\s+".join(re.escape(w) for w in p_key.split()) + r"\b", flags=re.IGNORECASE)
             if pattern.search(tao_text or ""):
                 detected.append(p_str)
@@ -461,20 +582,13 @@ def auto_detect_and_save_phrases(tao_text: str, zh_text: str = "") -> list[str]:
 
 
 def get_active_phrases() -> list[dict]:
-    store = _load_phrase_store()
-    disabled = set(store.get("disabled_auto", []))
-    out = []
-    for p in store.get("phrases", []):
-        key = normalize_phrase_key(p.get("phrase"))
-        if key and key not in disabled:
-            out.append(p)
-    return out
+    return list(_load_phrase_store().get("phrases", []))
 
 
-def merge_phrases_in_sentence(sentence: str) -> tuple[str, dict[str, dict]]:
+def merge_phrases_in_sentence(sentence: str, sent_key_id: str | None = None) -> tuple[str, dict[str, dict]]:
     """
     將句子中符合已登錄片語的多詞序列合併為單一詞元（以底線連接，如 pongso_no_tao），
-    並回傳 (合併後句子, {合併詞元小寫: 片語資訊})。
+    若該片語在此句子已被使用者取消，則不在此句合併。
     """
     s = sentence or ""
     phrases = sorted(get_active_phrases(), key=lambda x: -len(normalize_phrase_key(x.get("phrase", "")).split()))
@@ -484,6 +598,8 @@ def merge_phrases_in_sentence(sentence: str) -> tuple[str, dict[str, dict]]:
 
     for item in phrases:
         raw_p = (item.get("phrase") or "").strip()
+        if is_phrase_disabled_in_sentence(sent_key_id, raw_p):
+            continue
         words = [w for w in normalize_phrase_key(raw_p).split() if w]
         if len(words) < 2:
             continue
@@ -573,7 +689,6 @@ def _save_local_private_rows(username: str, rows: list[dict]) -> None:
 
 
 def save_private_record(private_payload: dict) -> bool:
-    """將私人對話存至獨立的 private_feedback 表（不寫入 feedback 表）；若尚無該表則退回個人本機/Session 儲存。"""
     username = private_payload["user_id"]
     try:
         supabase.from_(PRIVATE_TABLE).insert(private_payload).execute()
@@ -589,7 +704,6 @@ def save_private_record(private_payload: dict) -> bool:
 
 
 def fetch_user_private_records(username: str) -> list[dict]:
-    """讀取某位使用者的私人紀錄（優先自 private_feedback 讀取，並合併本機/Session 私人紀錄）。"""
     combined = []
     try:
         db_rows = fetch_all_rows(
@@ -669,7 +783,6 @@ def update_existing_conversation(
     new_r_zh: str,
     target_public: bool,
 ) -> tuple[bool, str]:
-    """更新先前對話紀錄的文句、翻譯，並支援在公開（feedback）與私人之間切換。"""
     current_username = user_info["username"]
     owner_id = existing_item.get("user_id")
     if current_username != "admin" and owner_id != current_username:
@@ -681,7 +794,6 @@ def update_existing_conversation(
 
     try:
         if was_private and not target_public:
-            # 維持私人
             if existing_item.get("_storage") == PRIVATE_TABLE:
                 supabase.from_(PRIVATE_TABLE).update({
                     "q_tao": new_q_tao,
@@ -707,7 +819,6 @@ def update_existing_conversation(
             return True, "已更新私人對話紀錄！"
 
         if was_private and target_public:
-            # 私人轉公開：寫入 feedback，再移除舊私人紀錄
             pub_data = {
                 "user_id": owner_id,
                 "user_email": existing_item.get("user_email") or user_info.get("email"),
@@ -733,7 +844,6 @@ def update_existing_conversation(
             return True, "已更新並改為「公開」存入 feedback！"
 
         if not was_private and target_public:
-            # 維持公開：更新 feedback
             fb_id = existing_item.get("id")
             upd_payload = {
                 "q_tao": new_q_tao,
@@ -766,7 +876,6 @@ def update_existing_conversation(
             load_all_raw_corpus.clear()
             return True, "已更新公開對話紀錄！"
 
-        # 公開轉私人：寫入私人儲存區，並從 feedback 刪除舊筆
         priv_data = {
             "user_id": owner_id,
             "user_email": existing_item.get("user_email") or user_info.get("email"),
@@ -813,7 +922,6 @@ def save_語料_to_supabase(
 
         auto_detect_and_save_phrases(f"{q_tao or ''} {r_tao or ''}", f"{q_zh or ''} {r_zh or ''}")
 
-        # 若選擇「私人」（is_public=False），直接存進個人/私人儲存區，不寫入 feedback 表
         if not bool(is_public):
             private_data = {
                 "user_id": user_info["username"],
@@ -1042,6 +1150,50 @@ def load_all_raw_corpus():
 
 
 load_all_raw_corpus.clear = _load_all_raw_corpus_cached.clear
+
+
+def find_bilingual_examples(target_word_or_phrase: str, limit: int = 5) -> list[tuple[str, str]]:
+    """從本網站蒐集到的句子（語料庫與公開社群例句）挑選包含目標詞／片語的雙語例句。"""
+    q = normalize_word(target_word_or_phrase)
+    if not q:
+        return []
+    parts = [p for p in q.split("_") if p]
+    examples = []
+    seen = set()
+
+    for it in load_all_raw_corpus():
+        tao = (it.get("tao") or "").strip()
+        zh = (it.get("zh") or "").strip()
+        if not tao:
+            continue
+        toks = {normalize_word(t) for t in tao.split()}
+        matched = (q in toks) or (len(parts) > 1 and all(p in toks for p in parts))
+        if matched and tao not in seen:
+            seen.add(tao)
+            examples.append((tao, zh))
+            if len(examples) >= limit:
+                return examples
+
+    try:
+        for fb in fetch_all_rows("feedback", order=[("id", True)]):
+            if not is_public_feedback(fb):
+                continue
+            for tao_col, zh_col in (("tao_text", "zh_text"), ("q_tao", "q_zh")):
+                tao = (fb.get(tao_col) or "").strip()
+                zh = (fb.get(zh_col) or "").strip()
+                if not tao:
+                    continue
+                toks = {normalize_word(t) for t in tao.split()}
+                matched = (q in toks) or (len(parts) > 1 and all(p in toks for p in parts))
+                if matched and tao not in seen:
+                    seen.add(tao)
+                    examples.append((tao, zh))
+                    if len(examples) >= limit:
+                        return examples
+    except Exception:
+        pass
+
+    return examples
 
 
 def search_relevant_corpus(user_input, top_k=3):
@@ -1774,7 +1926,7 @@ def apply_spelling_prefs(text, prefs):
 
 def classify_word(count, in_user_input, is_ai_generated, user_accepted):
     if count > HIGHLIGHT_THRESHOLD:
-        return None
+        return "black"
     if count == 0:
         if in_user_input:
             return "yellow"
@@ -1782,15 +1934,36 @@ def classify_word(count, in_user_input, is_ai_generated, user_accepted):
     return "yellow"
 
 
-def _plain(text, css_class="tao-w"):
-    st.markdown(f'<span class="{css_class}">{html.escape(text)}</span>', unsafe_allow_html=True)
+def _plain(text, css_class="tao-w", phrase_group=None):
+    if phrase_group:
+        st.markdown(
+            f'<span class="{css_class}" data-phrase-group="{html.escape(phrase_group)}">{html.escape(text)}</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(f'<span class="{css_class}">{html.escape(text)}</span>', unsafe_allow_html=True)
 
 
-def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=False, etymology_map=None, key_prefix="sentence", enable_word_voting=False, fb_id=None, current_user=None, user_input_text="", sentence_id=None):
+def render_interactive_sentence(
+    sentence,
+    is_ai_generated=False,
+    user_accepted=False,
+    etymology_map=None,
+    key_prefix="sentence",
+    enable_word_voting=False,
+    fb_id=None,
+    current_user=None,
+    user_input_text="",
+    sentence_id=None,
+    allow_phrase_selection=False,
+):
     if not isinstance(etymology_map, dict):
         etymology_map = {}
 
-    merged_sentence, phrase_meta = merge_phrases_in_sentence(sentence or "")
+    skey = sentence_key(fb_id, sentence_id)
+    sent_track_id = skey or key_prefix
+    merged_sentence, phrase_meta = merge_phrases_in_sentence(sentence or "", sent_key_id=sent_track_id)
+
     word_index = build_word_index()
     vote_data = load_vote_data()
     notes = load_word_notes()
@@ -1799,11 +1972,11 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
         for t in re.findall(r"[A-Za-z][A-Za-z0-9'’ʼʻ-]*", user_input_text or "")
     } - {""}
 
-    skey = sentence_key(fb_id, sentence_id)
     my_votes = load_user_votes(current_user) if (enable_word_voting and current_user) else set()
+    tokens_list = merged_sentence.split()
 
     with st.container(key=f"sent_{key_prefix}"):
-        for idx, token in enumerate(merged_sentence.split()):
+        for idx, token in enumerate(tokens_list):
             lead, w, trail = split_token(token)
             if lead:
                 _plain(lead, "tao-lead")
@@ -1811,199 +1984,273 @@ def render_interactive_sentence(sentence, is_ai_generated=False, user_accepted=F
             if w:
                 clean_w = normalize_word(w)
                 p_info = phrase_meta.get(clean_w)
-                if p_info:
-                    with st.popover(w, key=f"{key_prefix}_phr_{idx}"):
-                        st.markdown(f"### 🧩 片語詳情: **{p_info['phrase']}**")
-                        st.markdown(f"- **片語說明**: {p_info['meaning']}")
-                        st.markdown(f"- **來源**: {'自動辨識' if p_info['source'] == 'auto' else '手動登錄'}")
-                        if current_user and p_info["source"] == "auto":
-                            if st.button("🚫 取消此組合的自動登錄", key=f"btn_dis_phr_{key_prefix}_{idx}"):
-                                disable_auto_phrase(p_info["phrase"])
-                                st.success(f"已取消「{p_info['phrase']}」的自動登錄。")
-                                st.rerun()
-                    if trail:
-                        _plain(trail, "tao-punct")
-                    continue
+                phrase_group_id = f"{key_prefix}_pg_{clean_w}" if p_info else None
 
+                # 片語與一般單字一視同仁：未通過認證（用例 <= 10）呈現黃色，否則黑色可點擊
                 info = word_index.get(clean_w, {})
                 occ_count = info.get("count", 0)
                 in_user_raw = clean_w in raw_user_words
                 level = classify_word(occ_count, in_user_raw, is_ai_generated, user_accepted)
 
-                if level is None:
-                    _plain(w)
+                if p_info and level == "black":
+                    level = "yellow"
+
+                etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
+                example_zh = info.get("zh")
+                note = notes.get(clean_w)
+                gloss = "；".join(info.get("glosses", []))
+                detail_rec = get_word_detail_record(clean_w)
+
+                if detail_rec["explanation"]:
+                    zh_meaning = detail_rec["explanation"]
+                elif note:
+                    zh_meaning = note["description"]
+                elif p_info:
+                    zh_meaning = p_info["meaning"]
+                elif gloss:
+                    zh_meaning = gloss
                 else:
-                    etymology_text = etymology_map.get(w, etymology_map.get(clean_w, ""))
-                    example_zh = info.get("zh")
-                    note = notes.get(clean_w)
-                    gloss = "；".join(info.get("glosses", []))
-                    if note:
-                        zh_meaning = note["description"]
-                    elif gloss:
-                        zh_meaning = gloss
+                    zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
+
+                corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
+                if p_info:
+                    category_title = f"🧩 片語組合（{p_info['phrase']}）" + (" — 尚未達高頻用例（黃色）" if level == "yellow" else "")
+                elif level == "red":
+                    category_title = "🔴 AI 生成（語料庫與網站中未曾出現，且非使用者輸入）"
+                elif occ_count == 0 and in_user_raw:
+                    category_title = "🟡 使用者輸入（語料庫與網站中未曾出現，由使用者輸入）"
+                elif level == "yellow":
+                    category_title = f"🟡 低用例詞彙（語料庫有 {corpus_n} 次，用例 10 次以內）"
+                else:
+                    category_title = f"⚫ 一般詞彙（用例 {occ_count} 次，可點擊查看詳情）"
+
+                tag = "hlR" if level == "red" else ("hlY" if level == "yellow" else "hlK")
+
+                group_root = vote_data["group_of"].get(clean_w)
+                others = [m for m in vote_data["members"].get(group_root, []) if m != clean_w]
+                usage = {m: word_index.get(m, {}).get("count", 0) for m in [clean_w] + others}
+                votes_n = {m: vote_data["tally"].get(m, 0) for m in usage}
+                totals = {m: usage[m] + votes_n[m] for m in usage}
+                variants = [clean_w] + sorted(others, key=lambda m: -totals[m])
+
+                popover_label = f'<span data-phrase-group="{html.escape(phrase_group_id)}">{html.escape(w)}</span>' if phrase_group_id else w
+                with st.popover(popover_label, key=f"{key_prefix}_{tag}_{idx}"):
+                    st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
+                    st.markdown(f"- **分類**: {category_title}")
+                    st.markdown(f"- **用例數**: `{occ_count}` 次（語料庫 {corpus_n} ＋ 社群例句 {comm_n}）")
+
+                    # 若為此句子中的片語組合，提供「取消此句中的片語組合」
+                    if p_info and current_user:
+                        if st.button("✂️ 取消此句中的片語組合", key=f"btn_cancel_sent_phr_{key_prefix}_{idx}"):
+                            cancel_phrase_in_sentence(sent_track_id, p_info["phrase"])
+                            st.success(f"已取消本句中的片語「{p_info['phrase']}」（其他句子不受影響）。")
+                            st.rerun()
+
+                    st.divider()
+                    # 1. pipipangayan（達悟文解釋，預設空白，可編輯）
+                    st.markdown("**1. pipipangayan（達悟文的解釋）**")
+                    inp_pipi = st.text_input(
+                        "pipipangayan",
+                        value=detail_rec["pipipangayan"],
+                        key=f"pipi_{key_prefix}_{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                    # 2. 解釋（中文解釋，可編輯）
+                    st.markdown("**2. 解釋**")
+                    inp_expl = st.text_input(
+                        "解釋",
+                        value=zh_meaning if zh_meaning != "暫無中文說明" else "",
+                        key=f"expl_{key_prefix}_{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                    # 3. 語源（僅開放 固有詞 / 新造詞 / 音譯）
+                    st.markdown("**3. 語源**")
+                    cur_origin_type = detail_rec["origin_type"] if detail_rec["origin_type"] in ETYMOLOGY_OPTIONS else "固有詞"
+                    sel_origin_type = st.radio(
+                        "語源類型",
+                        ETYMOLOGY_OPTIONS,
+                        index=ETYMOLOGY_OPTIONS.index(cur_origin_type),
+                        horizontal=True,
+                        key=f"orig_type_{key_prefix}_{idx}",
+                        label_visibility="collapsed",
+                    )
+                    inp_root_combo = ""
+                    inp_loan_lang = ""
+                    if sel_origin_type == "固有詞":
+                        inp_root_combo = st.text_input(
+                            "詞根組合（選填）",
+                            value=detail_rec["root_combo"],
+                            placeholder="選填詞根組合",
+                            key=f"root_opt_{key_prefix}_{idx}",
+                        )
+                    elif sel_origin_type == "新造詞":
+                        inp_root_combo = st.text_input(
+                            "詞根組合（必填）*",
+                            value=detail_rec["root_combo"],
+                            placeholder="請填寫詞根組合（必填）",
+                            key=f"root_req_{key_prefix}_{idx}",
+                        )
+                    elif sel_origin_type == "音譯":
+                        inp_loan_lang = st.text_input(
+                            "何種語言（必填）*",
+                            value=detail_rec["loan_lang"],
+                            placeholder="例如：華語、日語、英語（必填）",
+                            key=f"lang_req_{key_prefix}_{idx}",
+                        )
+
+                    if current_user:
+                        if st.button("💾 儲存單字詳情", key=f"btn_save_detail_{key_prefix}_{idx}"):
+                            ok_d, msg_d = save_word_detail_record(
+                                key=clean_w,
+                                pipipangayan=inp_pipi,
+                                explanation=inp_expl,
+                                origin_type=sel_origin_type,
+                                root_combo=inp_root_combo,
+                                loan_lang=inp_loan_lang,
+                                editor=current_user,
+                            )
+                            if ok_d:
+                                if inp_expl.strip():
+                                    try:
+                                        save_word_note(clean_w, inp_expl.strip(), current_user)
+                                    except Exception:
+                                        pass
+                                st.success(msg_d)
+                                st.rerun()
+                            else:
+                                st.error(msg_d)
+
+                    # 4. 例句（從本網站蒐集到的句子挑選，列出雙語）
+                    st.divider()
+                    st.markdown("**4. 例句（雙語）**")
+                    bilingual_exs = find_bilingual_examples(clean_w, limit=5)
+                    if bilingual_exs:
+                        for ex_tao, ex_zh in bilingual_exs:
+                            st.markdown(f"- {ex_tao}  \n  {ex_zh}")
                     else:
-                        zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
-                    corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
-                    if level == "red":
-                        category_title = "🔴 AI 生成（語料庫與網站中未曾出現，且非使用者輸入）"
-                    elif occ_count == 0 and in_user_raw:
-                        category_title = "🟡 使用者輸入（語料庫與網站中未曾出現，由使用者輸入）"
-                    else:
-                        category_title = f"🟡 低用例詞彙（語料庫有 {corpus_n} 次，用例 10 次以內）"
-                    tag = "hlR" if level == "red" else "hlY"
+                        st.caption("目前網站例句中尚無包含此詞／片語的雙語例句。")
 
-                    group_root = vote_data["group_of"].get(clean_w)
-                    others = [m for m in vote_data["members"].get(group_root, []) if m != clean_w]
-                    usage = {m: word_index.get(m, {}).get("count", 0) for m in [clean_w] + others}
-                    votes_n = {m: vote_data["tally"].get(m, 0) for m in usage}
-                    totals = {m: usage[m] + votes_n[m] for m in usage}
-                    variants = [clean_w] + sorted(others, key=lambda m: -totals[m])
+                    # 異體字與投票
+                    st.divider()
+                    st.markdown("#### 📊 異體字與票數（票數 ＝ 本站用例 ＋ 投票人數）")
+                    for m in variants:
+                        mark = "（本句）" if m == clean_w else ""
+                        desc_m = (notes.get(m) or {}).get("description") or "；".join(word_index.get(m, {}).get("glosses", []))
+                        desc_part = f"〔{desc_m}〕" if desc_m else ""
+                        st.markdown(f"- **{m}**{mark}{desc_part}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
 
-                    with st.popover(w, key=f"{key_prefix}_{tag}_{idx}"):
-                        st.markdown(f"### 🔠 單字詳情: **{w}**")
-                        st.markdown(f"- **中文解釋**: {zh_meaning}")
-                        if note:
-                            st.caption(f"✏️ 已由 {note.get('editor') or '使用者'} 校正（{str(note.get('created_at') or '')[:10]}）")
-                            if note.get("tag") == LOANWORD_TAG:
-                                st.caption("🔁 現代借詞（華語音譯）：其他使用者的對話也會使用")
-                        st.markdown(f"- **分類**: {category_title}")
-                        sc = spell_check_word(clean_w)
-                        if sc["suggestions"] or sc["odd_chars"] or sc["glottal"]:
-                            st.markdown("🔎 **拼寫與寫法檢查**")
-                            if sc["glottal"]:
-                                st.markdown(
-                                    "- 只差喉塞音符號（'）的已知字："
-                                    + "、".join(f"**{c}**（語料庫 {n} 次）" for c, n in sc["glottal"])
-                                )
-                            if sc["suggestions"]:
-                                st.markdown(
-                                    "- 你是不是想寫："
-                                    + "、".join(f"**{c}**（語料庫 {n} 次，差 {d} 個字母）" for c, d, n in sc["suggestions"])
-                                )
-                            if sc["odd_chars"]:
-                                st.markdown("- 寫法提醒：字母 " + "、".join(f"「{c}」" for c in sc["odd_chars"]) + " 在語料庫中幾乎沒有出現過")
-                        if etymology_text and (example_zh or gloss) and not note:
-                            st.markdown(f"- **語源說明**: {etymology_text}")
-                        st.markdown(f"- **本站總用例數**: `{occ_count}` 次（語料庫 {corpus_n} ＋ 社群例句 {comm_n}）")
+                    if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
+                        st.info(f"✅ 您已對本句的「{w}」投過票了")
+                    elif enable_word_voting and current_user:
+                        st.markdown("#### 🗳️ 這裡該用哪個拼法？")
+                        w_choice = st.radio(
+                            "選擇拼法",
+                            variants,
+                            key=f"w_choice_{key_prefix}_{idx}",
+                            format_func=lambda m, t=totals: f"{m}（{t[m]}）",
+                            horizontal=True,
+                            label_visibility="collapsed",
+                        )
+                        st.caption("可登錄切分不同或拼法不同的異體字；意思只是相近的字請不要提出。")
+                        w_alt_input = st.text_input(
+                            "登錄新的異體字（單一單字；留空則只投上面的選擇）：",
+                            key=f"w_alt_{key_prefix}_{idx}",
+                            placeholder="例如：apiya",
+                        )
+                        w_rel = st.radio(
+                            "它與本字的關係：",
+                            [REL_SPELLING, REL_TRANSLATION],
+                            key=f"w_rel_{key_prefix}_{idx}",
+                        )
+                        w_shared = st.text_input(
+                            "兩字共同的中文描述（選「譯詞相同」時必填）：",
+                            key=f"w_shared_{key_prefix}_{idx}",
+                            value=note["description"] if note else "",
+                        )
 
-                        if current_user:
-                            current_desc = note["description"] if note else etymology_text
-                            new_desc = st.text_area(
-                                "解釋有誤？直接修改這個字的中文描述：",
-                                value=current_desc,
-                                key=f"desc_{key_prefix}_{idx}",
-                                height=80,
-                            )
-                            loan_default = bool(note and note.get("tag") == LOANWORD_TAG)
-                            loan_flag = st.checkbox(
-                                "這是現代借詞（華語音譯）",
-                                value=loan_default,
-                                key=f"loan_{key_prefix}_{idx}",
-                            )
-                            if others:
-                                st.caption(f"⚠️ 本字目前與 {'、'.join(others)} 互為異體字；使用者提出的異體關係，在描述改成與對方不同時會自動解除（單字表匯入的不受影響）。")
-                            if st.button("儲存描述", key=f"btn_desc_{key_prefix}_{idx}"):
-                                try:
-                                    nd = new_desc.strip()
-                                    if not nd:
-                                        raise ValueError("描述不可為空白。")
-                                    if nd == (current_desc or "").strip() and loan_flag == loan_default:
-                                        raise ValueError("描述沒有變更。")
-                                    save_word_note(clean_w, nd, current_user, tag=LOANWORD_TAG if loan_flag else None)
-                                    st.success("✅ 已更新描述")
-                                    st.rerun()
-                                except Exception as desc_err:
-                                    st.error(f"儲存失敗：{desc_err}")
+                        if st.button("送出投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
+                            try:
+                                load_user_votes.clear()
+                                if skey and (skey, clean_w) in _fetch_user_votes(current_user):
+                                    raise ValueError(f"您已對本句的「{w}」投過票，無法重複投票。")
 
-                        st.divider()
-                        st.markdown("#### 📊 異體字與票數（票數 ＝ 本站用例 ＋ 投票人數）")
-                        for m in variants:
-                            mark = "（本句）" if m == clean_w else ""
-                            desc_m = (notes.get(m) or {}).get("description") or "；".join(word_index.get(m, {}).get("glosses", []))
-                            desc_part = f"〔{desc_m}〕" if desc_m else ""
-                            st.markdown(f"- **{m}**{mark}{desc_part}：用例 {usage[m]} ＋ 投票 {votes_n[m]} ＝ `{totals[m]}` 票")
+                                alt_raw = w_alt_input.strip()
+                                if alt_raw and re.search(r"\s", alt_raw):
+                                    raise ValueError("提出的字請只輸入單一單字。")
+                                alt = normalize_word(alt_raw)
+                                if alt_raw and not alt:
+                                    raise ValueError("提出的字無效。")
 
-                        if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
-                            st.info(f"✅ 您已對本句的「{w}」投過票了")
-                        elif enable_word_voting and current_user:
-                            st.markdown("#### 🗳️ 這裡該用哪個拼法？")
-                            w_choice = st.radio(
-                                "選擇拼法",
-                                variants,
-                                key=f"w_choice_{key_prefix}_{idx}",
-                                format_func=lambda m, t=totals: f"{m}（{t[m]}）",
-                                horizontal=True,
-                                label_visibility="collapsed",
-                            )
-                            st.caption("只有「拼法不同」或「譯詞（描述）完全相同」的字才能成為異體字；意思只是相近的字請不要提出。")
-                            w_alt_input = st.text_input(
-                                "提出新的異體字（單一單字；留空則只投上面的選擇）：",
-                                key=f"w_alt_{key_prefix}_{idx}",
-                                placeholder="例如：apiya",
-                            )
-                            w_rel = st.radio(
-                                "它與本字的關係：",
-                                [REL_SPELLING, REL_TRANSLATION],
-                                key=f"w_rel_{key_prefix}_{idx}",
-                            )
-                            w_shared = st.text_input(
-                                "兩字共同的中文描述（選「譯詞相同」時必填）：",
-                                key=f"w_shared_{key_prefix}_{idx}",
-                                value=note["description"] if note else "",
-                            )
+                                pick, rel_part = w_choice, ""
+                                if alt and alt != clean_w:
+                                    rel = "spelling" if w_rel == REL_SPELLING else "translation"
+                                    load_word_notes.clear()
+                                    ok, msg, to_save = check_variant_proposal(clean_w, alt, rel, w_shared, load_word_notes())
+                                    if not ok:
+                                        raise ValueError(msg)
+                                    for ww, dd in to_save.items():
+                                        save_word_note(ww, dd, current_user)
+                                    pick, rel_part = alt, f" | rel:{rel}"
+                                elif alt:
+                                    pick = alt
 
-                            if st.button("送出投票", key=f"btn_w_vote_{key_prefix}_{idx}"):
-                                try:
-                                    load_user_votes.clear()
-                                    if skey and (skey, clean_w) in _fetch_user_votes(current_user):
-                                        raise ValueError(f"您已對本句的「{w}」投過票，無法重複投票。")
+                                voter_info = st.session_state.user_info
+                                voter_region = voter_info.get("region", "未知")
+                                voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
 
-                                    alt_raw = w_alt_input.strip()
-                                    if alt_raw and re.search(r"\s", alt_raw):
-                                        raise ValueError("提出的字請只輸入單一單字。")
-                                    alt = normalize_word(alt_raw)
-                                    if alt_raw and not alt:
-                                        raise ValueError("提出的字無效。")
+                                sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
+                                suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
 
-                                    pick, rel_part = w_choice, ""
-                                    if alt and alt != clean_w:
-                                        rel = "spelling" if w_rel == REL_SPELLING else "translation"
-                                        load_word_notes.clear()
-                                        ok, msg, to_save = check_variant_proposal(clean_w, alt, rel, w_shared, load_word_notes())
-                                        if not ok:
-                                            raise ValueError(msg)
-                                        for ww, dd in to_save.items():
-                                            save_word_note(ww, dd, current_user)
-                                        pick, rel_part = alt, f" | rel:{rel}"
-                                    elif alt:
-                                        pick = alt
-
-                                    voter_info = st.session_state.user_info
-                                    voter_region = voter_info.get("region", "未知")
-                                    voter_region_str = ", ".join(voter_region) if isinstance(voter_region, list) else voter_region
-
-                                    sent_part = f" | sent:{sentence_id}" if (not fb_id and sentence_id) else ""
-                                    suggestion_content = f"word_key:{clean_w}{sent_part} | pick:{pick}{rel_part}"
-
-                                    supabase.from_("community_votes").insert({
-                                        "feedback_id": fb_id if fb_id else 0,
-                                        "voter_id": current_user,
-                                        "region": voter_region_str,
-                                        "age_group": voter_info.get("age_group", "未知"),
-                                        "gender": voter_info.get("gender", "未知"),
-                                        "vote_result": "贊同" if pick == clean_w else "不贊同",
-                                        "hidden_suggestion": suggestion_content,
-                                        "timestamp": datetime.datetime.now().isoformat(),
-                                    }).execute()
-                                    load_vote_data.clear()
-                                    load_user_votes.clear()
-                                    st.success(f"🎉 已投給「{pick}」！")
-                                    st.rerun()
-                                except Exception as vote_err:
-                                    st.error(f"投票失敗：{vote_err}")
+                                supabase.from_("community_votes").insert({
+                                    "feedback_id": fb_id if fb_id else 0,
+                                    "voter_id": current_user,
+                                    "region": voter_region_str,
+                                    "age_group": voter_info.get("age_group", "未知"),
+                                    "gender": voter_info.get("gender", "未知"),
+                                    "vote_result": "贊同" if pick == clean_w else "不贊同",
+                                    "hidden_suggestion": suggestion_content,
+                                    "timestamp": datetime.datetime.now().isoformat(),
+                                }).execute()
+                                load_vote_data.clear()
+                                load_user_votes.clear()
+                                st.success(f"🎉 已投給「{pick}」！")
+                                st.rerun()
+                            except Exception as vote_err:
+                                st.error(f"投票失敗：{vote_err}")
 
             if trail:
                 _plain(trail, "tao-punct")
+
+    # 直接在對話文句下方提供選取詞彙登錄為片語
+    if allow_phrase_selection and current_user and len(tokens_list) >= 2:
+        word_candidates = []
+        for idx_c, tok_c in enumerate(tokens_list):
+            _, core_c, _ = split_token(tok_c)
+            if core_c:
+                word_candidates.append((idx_c, core_c))
+        if len(word_candidates) >= 2:
+            with st.popover("🧩 在此句中選取組合登錄為片語", key=f"pop_sel_phrase_{key_prefix}"):
+                picked_indices = st.multiselect(
+                    "勾選要組合成片語的詞彙（依出現順序組合）：",
+                    options=[i for i, _ in word_candidates],
+                    format_func=lambda i: f"{i+1}. {word_candidates[[x for x,_ in word_candidates].index(i)][1]}",
+                    key=f"ms_phrase_{key_prefix}",
+                )
+                phr_meaning_inp = st.text_input(
+                    "片語中文解釋（選填）：",
+                    key=f"inp_phr_mean_{key_prefix}",
+                    placeholder="例如：蘭嶼",
+                )
+                if st.button("✅ 登錄為片語", key=f"btn_reg_phr_{key_prefix}"):
+                    ordered = [word_candidates[[x for x, _ in word_candidates].index(i)][1] for i in sorted(picked_indices)]
+                    joined_phrase = " ".join(ordered)
+                    if register_phrase(joined_phrase, meaning=phr_meaning_inp, source="manual"):
+                        st.success(f"已登錄片語「{joined_phrase}」，點擊文句中對應詞彙即可編輯單字詳情！")
+                        st.rerun()
+                    else:
+                        st.warning("請至少勾選 2 個詞彙。")
 
 
 # --- 6. 雙軌邏輯 ---
@@ -2298,13 +2545,14 @@ if main_menu == "miAI ko / 我要用AI":
                     enable_word_voting=False,
                     current_user=st.session_state.user_info["username"],
                     user_input_text=q_orig,
+                    allow_phrase_selection=True,
                 )
                 st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{ai_data.get('user_translation', '')}</div>", unsafe_allow_html=True)
                 _notes_user = spellcheck_notes(user_sentence)
                 if _notes_user:
                     st.caption("🔎 拼寫檢查：" + "；".join(_notes_user))
 
-            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊有螢光標籤的單字查看說明與投票)")
+            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任何單字或片語查看詳情與投票)")
             render_interactive_sentence(
                 ai_data.get("ai_reply_tao", ""),
                 is_ai_generated=is_ai,
@@ -2315,6 +2563,7 @@ if main_menu == "miAI ko / 我要用AI":
                 current_user=st.session_state.user_info["username"],
                 user_input_text=q_orig,
                 sentence_id=ai_data.get("sentence_id"),
+                allow_phrase_selection=True,
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
             if ai_data.get("spelling_swaps"):
@@ -2418,55 +2667,6 @@ if main_menu == "miAI ko / 我要用AI":
                         st.success("🎉 已成功儲存私人修正版！" if not is_public_selected else "🎉 已成功更新修正版")
                         del st.session_state.ai_data
                         st.rerun()
-
-        # --- 片語辨識與管理區塊 ---
-        st.divider()
-        with st.expander("🧩 片語辨識與管理（自動擷取／手動登錄／取消自動登錄）"):
-            st.caption("當文字中出現如「蘭嶼（pongso no tao）」的多詞組合時，系統會自動記錄為片語；您也可以手動登錄或取消自動登錄。")
-            p_col1, p_col2 = st.columns([2, 2])
-            with p_col1:
-                new_phrase_str = st.text_input("登錄片語（至少 2 個詞，例如：pongso no tao）", key="manual_phrase_input")
-            with p_col2:
-                new_phrase_meaning = st.text_input("片語中文或說明（例如：蘭嶼）", key="manual_phrase_meaning_input")
-            if st.button("➕ 手動登錄為片語", key="btn_add_manual_phrase"):
-                if register_phrase(new_phrase_str, meaning=new_phrase_meaning, source="manual"):
-                    st.success(f"已登錄片語「{new_phrase_str.strip()}」！")
-                    st.rerun()
-                else:
-                    st.warning("請輸入至少包含兩個詞彙的片語。")
-
-            p_store = _load_phrase_store()
-            active_p_list = get_active_phrases()
-            st.markdown("**目前生效的片語：**")
-            if not active_p_list:
-                st.caption("目前尚無生效片語。")
-            else:
-                for p_idx, p_item in enumerate(active_p_list):
-                    p_name = p_item.get("phrase", "")
-                    p_src = "自動辨識" if p_item.get("source") == "auto" else "手動登錄"
-                    c_info, c_act1, c_act2 = st.columns([4, 1.5, 1.5])
-                    with c_info:
-                        st.markdown(f"- **{p_name}** — {p_item.get('meaning', '')} `({p_src})`")
-                    with c_act1:
-                        if st.button("🚫 取消自動登錄", key=f"dis_auto_p_{p_idx}"):
-                            disable_auto_phrase(p_name)
-                            st.rerun()
-                    with c_act2:
-                        if st.button("🗑️ 移除", key=f"del_p_{p_idx}"):
-                            delete_phrase_item(p_name)
-                            st.rerun()
-
-            disabled_list = p_store.get("disabled_auto", [])
-            if disabled_list:
-                st.markdown("**已取消自動登錄的組合：**")
-                for d_idx, d_key in enumerate(disabled_list):
-                    dc1, dc2 = st.columns([5, 1.5])
-                    with dc1:
-                        st.caption(f"- {d_key}")
-                    with dc2:
-                        if st.button("↩️ 恢復自動辨識", key=f"en_auto_p_{d_idx}"):
-                            enable_auto_phrase(d_key)
-                            st.rerun()
 
         # --- 使用者自己的歷史對話紀錄（含編輯、公開/私人切換、刪除） ---
         st.divider()
@@ -2576,7 +2776,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             st.markdown(
                 f"- 語料庫：**{len(_corpus_only)}** 筆；已驗證併入的社群語料：**{len(_raw) - len(_corpus_only) - len(_pending)}** 筆；"
                 f"待審的 AI 生成例句：**{len(_pending)}** 筆（不計入用例與比對）\n"
-                f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次才是一般單字，其餘會標示螢光"
+                f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次為黑色一般詞彙（可點擊查看詳情），其餘會標示螢光"
             )
             if not _corpus_only:
                 _d = diagnose_corpus_table()
@@ -2696,10 +2896,11 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                             enable_word_voting=False,
                             current_user=current_user,
                             user_input_text=q_tao_val if fb_origin == "tao" else "",
+                            allow_phrase_selection=bool(current_user),
                         )
                         st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{q_zh_val}</div>", unsafe_allow_html=True)
 
-                    st.markdown("##### tovis (答 - 點擊有螢光標籤的單字即可查看說明與投票)")
+                    st.markdown("##### tovis (答 - 點擊任何單字或片語即可查看詳情與投票)")
 
                     render_interactive_sentence(
                         fb.get("tao_text", ""),
@@ -2710,6 +2911,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         fb_id=fb_id,
                         current_user=current_user,
                         user_input_text=q_tao_val if fb_origin == "tao" else "",
+                        allow_phrase_selection=bool(current_user),
                     )
                     st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 8px;'>{fb.get('zh_text')}</div>", unsafe_allow_html=True)
 
@@ -2733,9 +2935,9 @@ elif main_menu == "amian so AI ori / 關於本站":
         本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
 
         ### 系統特色
-        1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持正常顯示；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
-        2. **語源與字根解析**：點選詞彙可檢視 etymology（傳統用法、日語、英語、中文等借詞來源）。
-        3. **單字用法社群投票**：社群成員可在同一個詞的不同拼法之間投票，也能提出新的拼法；系統會依每位使用者自己的打字與投票習慣調整回應用字，彼此不互相干擾。若 AI 對單字的解釋有誤，使用者可直接修改描述，之後該字一律顯示修改後的描述；異體字僅限拼法不同或譯詞（描述）相同的字，意思只是相近的字不算。
+        1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
+        2. **片語辨識與互動**：句子中出現如「蘭嶼（pongso no tao）」或已登錄片語組合時，直接於對話文句中視為一個單字單位；滑鼠懸停時整組片語會一起出現黑底線，也可在句子中選取組合登錄片語或僅取消該句的片語合併。
+        3. **單字詳情與社群投票**：點擊任何單字或片語即可編輯 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）與檢視雙語例句與用例數，也可登錄異體字或參與拼法投票。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
