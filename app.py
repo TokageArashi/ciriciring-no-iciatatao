@@ -301,6 +301,14 @@ def _first_col(row: dict, cols: list[str]) -> str:
     return ""
 
 
+def _detect_col_name(row: dict, cols: list[str], fallback: str) -> str:
+    if isinstance(row, dict):
+        for c in cols:
+            if c in row:
+                return c
+    return fallback
+
+
 def get_fb_q_tao(row: dict) -> str:
     if not isinstance(row, dict):
         return ""
@@ -336,6 +344,29 @@ def is_sentence_item(item: dict) -> bool:
     return bool(tao and len(tao.split()) > 1)
 
 
+def update_corpus_sentence(corpus_row: dict, new_tao: str, new_zh: str, editor: str) -> tuple[bool, str]:
+    """更新語料庫（corpus）中的句子，讓語料更接近自然的達悟語。"""
+    cid = corpus_row.get("id")
+    if cid is None:
+        return False, "找不到語料庫句子 ID。"
+    tao_col = _detect_col_name(corpus_row, CORPUS_TAO_COLS, "tao")
+    zh_col = _detect_col_name(corpus_row, CORPUS_ZH_COLS, "zh")
+    payload = {
+        tao_col: new_tao.strip(),
+        zh_col: new_zh.strip(),
+    }
+    try:
+        supabase.from_("corpus").update(payload).eq("id", cid).execute()
+        load_all_raw_corpus.clear()
+        build_word_index.clear()
+        find_bilingual_examples.clear()
+        _spell_resources.clear()
+        spell_check_word.clear()
+        return True, f"已更新語料庫句子 #{cid}（編輯者：{editor}）。"
+    except Exception as e:
+        return False, f"更新語料庫失敗：{e}"
+
+
 @st.cache_data(ttl=300)
 def _load_all_raw_corpus_cached():
     """
@@ -351,6 +382,8 @@ def _load_all_raw_corpus_cached():
             corpus_items.append(
                 {
                     "id": f"Corpus ID #{r.get('id')}",
+                    "corpus_id": r.get("id"),
+                    "corpus_raw": r,
                     "tao": tao,
                     "zh": zh,
                     "source": r.get("source") or "語料庫",
@@ -1242,7 +1275,6 @@ def search_relevant_corpus(user_input, top_k=3, username=None):
             if clean_input in item["full_text"] or (phrase and phrase in " ".join(item_words)):
                 score += 100
 
-            # 文法詞／句型結構匹配權重
             gram_overlap = len(user_gram & item_gram)
             if gram_overlap:
                 score += gram_overlap * 15
@@ -2033,7 +2065,6 @@ def apply_variant_policy(text, policy):
         elif root in defaults and w not in defaults[root]["pool"]:
             target = defaults[root]["preferred"]
         else:
-            # 無異體字群組時，若同字根／高頻詞有顯著更高的社群用例數，亦適度向社群高頻靠攏
             cur_count = idx.get(w, {}).get("count", 0)
             if cur_count <= 2 and w in notes:
                 cur_desc = _desc_norm(notes[w].get("description"))
@@ -2753,8 +2784,8 @@ if main_menu == "miAI ko / 我要用AI":
         st.divider()
 
         st.markdown(dual_text("mivatvatek", "請輸入文字"), unsafe_allow_html=True)
-        text_input = st.text_input("text_input_box", placeholder="例如：Akokay / 蘭嶼（pongso no tao）", label_visibility="collapsed")
-        if st.button("itoro 發送查詢（演算法優先）"):
+        text_input = st.text_input("text_input_box", placeholder="akokay…／你好…", label_visibility="collapsed")
+        if st.button("itoro 發送查詢"):
             if text_input.strip():
                 with st.spinner("⏳ 演算法檢索與備援處理中..."):
                     ai_data = process_ai_input(
@@ -2820,7 +2851,7 @@ if main_menu == "miAI ko / 我要用AI":
                 if _notes_user:
                     st.caption("🔎 拼寫檢查：" + "；".join(_notes_user))
 
-            st.markdown("##### maniring o AI/演算法 am (回應結果 - 點擊任何單字或片語查看詳情與投票)")
+            st.markdown("##### maniring o AI/演算法 am (回應結果)")
             render_interactive_sentence(
                 ai_data.get("ai_reply_tao", ""),
                 is_ai_generated=is_ai,
@@ -3051,7 +3082,9 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         dual_text("kapisirisiring kano manita o vakong no ciring", "社群驗證與單字用法投票", is_title=True),
         unsafe_allow_html=True,
     )
-    with st.expander("🧪 語料庫檢索狀態（檢查標註是否正確）"):
+    current_user = st.session_state.user_info["username"] if st.session_state.user_info else None
+
+    with st.expander("🧪 語料庫檢索狀態"):
         try:
             _raw = load_all_raw_corpus()
             _pending = [it for it in _raw if is_unverified(it)]
@@ -3059,8 +3092,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             _pub_search_only = [it for it in _raw if it.get("is_feedback") and not is_unverified(it)]
             _widx = build_word_index()
             st.markdown(
-                f"- 語料庫：**{len(_corpus_only)}** 筆；已公開納入演算法搜尋的社群句子：**{len(_pub_search_only)}** 筆；"
-                f"待審的 AI 生成例句：**{len(_pending)}** 筆（不計入用例與比對）\n"
+                f"- 語料庫：**{len(_corpus_only)}** 筆；已公開納入演算法搜尋的社群句子：**{len(_pub_search_only)}** 筆\n"
                 f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次為黑色一般詞彙（可點擊查看詳情），其餘會標示螢光"
             )
             if not _corpus_only:
@@ -3083,7 +3115,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 st.markdown("- 最常出現的字：" + "、".join(f"{w}（{e['count']}）" for w, e in _top))
         except Exception as diag_err:
             st.error(f"診斷失敗：{diag_err}")
-        if st.button("🔄 重新載入語料庫（清除快取）", key="reload_corpus_cache"):
+        if st.button("🔄 重新載入語料庫", key="reload_corpus_cache"):
             load_all_raw_corpus.clear()
             build_word_index.clear()
             load_vote_data.clear()
@@ -3103,13 +3135,11 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
         if not feedbacks:
             st.info("目前尚無公開的社群語料。")
         else:
-            current_user = st.session_state.user_info["username"] if st.session_state.user_info else None
-
             st.markdown("#### 🔍 檢索單字用例")
             search_raw = st.text_input(
                 "輸入單字，查找包含該字的用例（留空則顯示全部）",
                 key="fb_search_word",
-                placeholder="例如：ma'ogto",
+                placeholder="",
             )
             query = normalize_word(search_raw.split()[0]) if search_raw.strip() else ""
             shown = feedbacks
@@ -3153,9 +3183,35 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 ]
                 st.markdown(f"📚 語料庫：**{len(corpus_hits)}** 筆句子")
                 if corpus_hits:
-                    with st.expander("查看語料庫例句"):
-                        for it in corpus_hits[:20]:
-                            st.markdown(f"- {it['tao']} — {it['zh']}")
+                    with st.expander("查看與編輯語料庫例句"):
+                        for idx_c, it in enumerate(corpus_hits[:20]):
+                            c_raw = it.get("corpus_raw") or {}
+                            c_id = it.get("corpus_id") or c_raw.get("id")
+                            st.markdown(f"- **#{c_id}**：{it['tao']} — {it['zh']}")
+                            if current_user and c_raw:
+                                with st.popover(f"✏️ 編輯語料庫句子 #{c_id}", key=f"pop_edit_corpus_{c_id}_{idx_c}"):
+                                    ed_c_tao = st.text_input(
+                                        "達悟語句子（修改為更自然的達悟語）",
+                                        value=it.get("tao") or "",
+                                        key=f"ed_c_tao_{c_id}_{idx_c}",
+                                    )
+                                    ed_c_zh = st.text_input(
+                                        "中文翻譯",
+                                        value=it.get("zh") or "",
+                                        key=f"ed_c_zh_{c_id}_{idx_c}",
+                                    )
+                                    if st.button("💾 儲存語料庫修改", key=f"btn_save_c_{c_id}_{idx_c}"):
+                                        ok_c, msg_c = update_corpus_sentence(
+                                            c_raw,
+                                            canon_apostrophes(ed_c_tao),
+                                            ed_c_zh,
+                                            current_user,
+                                        )
+                                        if ok_c:
+                                            st.success(msg_c)
+                                            st.rerun()
+                                        else:
+                                            st.error(msg_c)
                         if len(corpus_hits) > 20:
                             st.caption(f"僅顯示前 20 筆，共 {len(corpus_hits)} 筆。")
                 if include_variants:
@@ -3163,6 +3219,39 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                 if not shown:
                     st.info(f"找不到包含「{query}」的公開社群例句。")
                 st.divider()
+            elif current_user:
+                corpus_all = [it for it in load_all_raw_corpus() if not it.get("is_feedback") and not is_unverified(it) and it.get("corpus_raw")]
+                if corpus_all:
+                    with st.expander("✏️ 編輯語料庫句子（讓句子更接近自然的達悟語）"):
+                        for idx_ca, it in enumerate(corpus_all[:30]):
+                            c_raw = it.get("corpus_raw") or {}
+                            c_id = it.get("corpus_id") or c_raw.get("id")
+                            st.markdown(f"- **#{c_id}**：{it['tao']} — {it['zh']}")
+                            with st.popover(f"✏️ 編輯 #{c_id}", key=f"pop_ed_all_corp_{c_id}_{idx_ca}"):
+                                ed_ca_tao = st.text_input(
+                                    "達悟語句子",
+                                    value=it.get("tao") or "",
+                                    key=f"ed_ca_tao_{c_id}_{idx_ca}",
+                                )
+                                ed_ca_zh = st.text_input(
+                                    "中文翻譯",
+                                    value=it.get("zh") or "",
+                                    key=f"ed_ca_zh_{c_id}_{idx_ca}",
+                                )
+                                if st.button("💾 儲存修改", key=f"btn_save_ca_{c_id}_{idx_ca}"):
+                                    ok_ca, msg_ca = update_corpus_sentence(
+                                        c_raw,
+                                        canon_apostrophes(ed_ca_tao),
+                                        ed_ca_zh,
+                                        current_user,
+                                    )
+                                    if ok_ca:
+                                        st.success(msg_ca)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg_ca)
+                        if len(corpus_all) > 30:
+                            st.caption("輸入單字檢索可精準定位更多語料庫句子。")
 
             for fb in shown:
                 fb_id = fb["id"]
@@ -3188,7 +3277,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
                         )
                         st.markdown(f"<div style='font-size: 14px; opacity: 0.8;'>{q_zh_val}</div>", unsafe_allow_html=True)
 
-                    st.markdown("##### tovis (答 - 點擊任何單字或片語即可查看詳情與投票)")
+                    st.markdown("##### tovis (答)")
 
                     render_interactive_sentence(
                         fb.get("tao_text", ""),
@@ -3225,7 +3314,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **公開句子文法檢索與個人／社群單字偏好**：句子只要公開即納入演算法搜尋池，主要參照句中文法；AI 回應中的單字與拼法則優先看個人傾向與社群用例數，盡量採用個人常用或社群高頻的拼法或單字。
-        3. **單字詳情與社群投票**：點擊任何單字或片語即可查看 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）並按「編輯」修改，查看雙語例句（各詞 1 句）、含異體字總和的用例數與各異體字明細（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
+        3. **語料庫句子編輯、單字詳情與社群投票**：使用者可編輯語料庫句子以更貼近自然達悟語；點擊任何單字或片語即可查看 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）並按「編輯」修改，查看雙語例句（各詞 1 句）、含異體字總和的用例數與各異體字明細（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
