@@ -2905,7 +2905,7 @@ if main_menu == "miAI ko / 我要用AI":
         text_input = st.text_input("text_input_box", placeholder="akokay…／你好…", label_visibility="collapsed")
         if st.button("itoro 發送查詢"):
             if text_input.strip():
-                with st.spinner("⏳ 演算法檢索與備援處理中..."):
+                with st.spinner("na nakenakemen am…／正在思考…"):
                     ai_data = process_ai_input(
                         text_prompt=text_input,
                         username=st.session_state.user_info["username"],
@@ -3048,15 +3048,11 @@ if main_menu == "miAI ko / 我要用AI":
                         st.rerun()
 
             elif "beken" in eval_choice:
-                st.warning("⚠ 發現錯誤。您可以修正文字，並保留修正前的 AI 原始答句與原始中文翻譯：")
+                st.warning("⚠ 發現錯誤。您可以修正文字，系統將自動保留修正前的 AI 原始答句與原始中文翻譯：")
 
-                default_orig_ai_a = ai_data.get("ai_reply_tao", "")
-                default_orig_ai_a_zh = ai_data.get("ai_reply_zh", "")
-
-                st.markdown("**修正前 AI 原始達悟文答句**")
-                orig_ai_a_inp = st.text_input("修正前 AI 原始達悟文答句：", value=default_orig_ai_a, key="orig_ai_a_input")
-                st.markdown("**修正前 AI 答句的原始中文翻譯**")
-                orig_ai_a_zh_inp = st.text_input("修正前 AI 答句的原始中文翻譯：", value=default_orig_ai_a_zh, key="orig_ai_a_zh_input")
+                # 不提供輸入框，直接自動記錄 AI 原始生成結果
+                orig_ai_a_val = ai_data.get("ai_reply_tao", "")
+                orig_ai_a_zh_val = ai_data.get("ai_reply_zh", "")
 
                 st.markdown("**ablisan o pacici**<br><span style='font-size:14px; opacity:0.8;'>修正【問題】</span>", unsafe_allow_html=True)
                 e_q_tao = st.text_input("修改句子 1 達悟語：", value=ai_data.get("user_recognized_tao", q_orig))
@@ -3071,8 +3067,8 @@ if main_menu == "miAI ko / 我要用AI":
                 if st.button("voka 💾 儲存修正版"):
                     clean_e_q_tao = canon_apostrophes(e_q_tao.strip())
                     clean_e_r_tao = canon_apostrophes(e_r_tao.strip())
-                    clean_orig_ai_a = canon_apostrophes((orig_ai_a_inp or "").strip())
-                    clean_orig_ai_a_zh = (orig_ai_a_zh_inp or "").strip()
+                    clean_orig_ai_a = canon_apostrophes((orig_ai_a_val or "").strip())
+                    clean_orig_ai_a_zh = (orig_ai_a_zh_val or "").strip()
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
