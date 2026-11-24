@@ -570,6 +570,7 @@ try_auto_login_from_device()
 
 # --- 2.5 單字／片語詳情儲存與片語辨識 ---
 ETYMOLOGY_OPTIONS = ["固有詞", "新造詞", "音譯"]
+PHRASE_ETYMOLOGY_OPTIONS = ["固有詞", "新造詞"]
 
 DEFAULT_AUTO_PHRASES = [
     {"phrase": "pongso no tao", "meaning": "蘭嶼（人之島）", "source": "auto"},
@@ -613,6 +614,7 @@ def get_word_detail_record(key: str) -> dict:
         "origin_type": rec.get("origin_type", "固有詞"),
         "root_combo": rec.get("root_combo", ""),
         "loan_lang": rec.get("loan_lang", ""),
+        "variants_note": rec.get("variants_note", ""),
         "editor": rec.get("editor", ""),
         "updated_at": rec.get("updated_at", ""),
     }
@@ -626,6 +628,7 @@ def save_word_detail_record(
     root_combo: str,
     loan_lang: str,
     editor: str,
+    variants_note: str = "",
 ) -> tuple[bool, str]:
     k = (key or "").strip().lower()
     if not k:
@@ -644,11 +647,82 @@ def save_word_detail_record(
         "origin_type": origin_type,
         "root_combo": (root_combo or "").strip(),
         "loan_lang": (loan_lang or "").strip(),
+        "variants_note": (variants_note or "").strip(),
         "editor": editor,
         "updated_at": datetime.datetime.now().isoformat(),
     }
     _save_word_details_store(store)
     return True, "已儲存單字詳情！"
+
+
+def register_phrase_with_details(
+    phrase: str,
+    pipipangayan: str = "",
+    explanation: str = "",
+    origin_type: str = "固有詞",
+    root_combo: str = "",
+    variants_note: str = "",
+    editor: str = "",
+) -> tuple[bool, str]:
+    norm_phrase = re.sub(r"\s+", " ", (phrase or "").strip())
+    key = normalize_phrase_key(norm_phrase)
+    if not key or len(key.split()) < 2:
+        return False, "請至少勾選 2 個詞彙。"
+    if not (explanation or "").strip():
+        return False, "「解釋」為必填欄位。"
+    if origin_type not in PHRASE_ETYMOLOGY_OPTIONS:
+        return False, "片語語源僅可選擇：固有詞、新造詞。"
+
+    store = _load_phrase_store()
+    existing_idx = None
+    for idx, item in enumerate(store.get("phrases", [])):
+        if normalize_phrase_key(item.get("phrase")) == key:
+            existing_idx = idx
+            break
+
+    entry = {
+        "phrase": norm_phrase,
+        "meaning": (explanation or "").strip(),
+        "pipipangayan": (pipipangayan or "").strip(),
+        "origin_type": origin_type,
+        "root_combo": (root_combo or "").strip(),
+        "variants_note": (variants_note or "").strip(),
+        "source": "manual",
+    }
+    if existing_idx is not None:
+        store["phrases"][existing_idx] = entry
+    else:
+        store.setdefault("phrases", []).append(entry)
+    _save_phrase_store(store)
+
+    detail_store = _load_word_details_store()
+    merged_key = "_".join(key.split())
+    detail_store[merged_key] = {
+        "pipipangayan": (pipipangayan or "").strip(),
+        "explanation": (explanation or "").strip(),
+        "origin_type": origin_type,
+        "root_combo": (root_combo or "").strip(),
+        "loan_lang": "",
+        "variants_note": (variants_note or "").strip(),
+        "editor": editor,
+        "updated_at": datetime.datetime.now().isoformat(),
+    }
+    _save_word_details_store(detail_store)
+
+    if (variants_note or "").strip() and editor:
+        alt_tokens = [
+            normalize_word(t)
+            for t in re.split(r"[,，、/／\s]+", variants_note.strip())
+            if normalize_word(t)
+        ]
+        for alt_w in alt_tokens:
+            if alt_w and alt_w != merged_key:
+                try:
+                    save_word_note(alt_w, (explanation or "").strip(), editor)
+                except Exception:
+                    pass
+
+    return True, f"已登錄片語「{norm_phrase}」！"
 
 
 def _load_phrase_store() -> dict:
@@ -731,6 +805,7 @@ def register_phrase(phrase: str, meaning: str = "", source: str = "manual") -> b
             cur.setdefault("origin_type", "固有詞")
             cur.setdefault("root_combo", "")
             cur.setdefault("loan_lang", "")
+            cur.setdefault("variants_note", "")
             detail_store[merged_key] = cur
             _save_word_details_store(detail_store)
     return True
@@ -873,7 +948,7 @@ def save_private_record(private_payload: dict) -> bool:
         except Exception as db_err:
             err_msg = str(db_err)
             removed = False
-            for opt_col in ("orig_ai_q_tao", "orig_ai_a_tao"):
+            for opt_col in ("orig_ai_a_tao", "orig_ai_a_zh"):
                 if opt_col in payload and opt_col in err_msg:
                     payload.pop(opt_col)
                     removed = True
@@ -972,7 +1047,7 @@ def _insert_public_feedback_row(data: dict) -> bool:
                 payload["q_original"] = payload.pop("q_tao")
                 payload["q_trans"] = payload.pop("q_zh", None)
                 removed = True
-            for opt_col in ("is_public", "origin", "input_lang_type", "orig_ai_q_tao", "orig_ai_a_tao"):
+            for opt_col in ("is_public", "origin", "input_lang_type", "orig_ai_a_tao", "orig_ai_a_zh"):
                 if opt_col in payload and opt_col in err_msg:
                     payload.pop(opt_col)
                     removed = True
@@ -998,8 +1073,8 @@ def save_語料_to_supabase(
     origin=None,
     pending_sentence_id=None,
     edit_record=None,
-    orig_ai_q_tao=None,
     orig_ai_a_tao=None,
+    orig_ai_a_zh=None,
 ):
     try:
         region_val = bg_info["region"]
@@ -1020,8 +1095,8 @@ def save_語料_to_supabase(
                 "q_zh": q_zh,
                 "tao_text": r_tao,
                 "zh_text": r_zh,
-                "orig_ai_q_tao": orig_ai_q_tao,
                 "orig_ai_a_tao": orig_ai_a_tao,
+                "orig_ai_a_zh": orig_ai_a_zh,
                 "is_edited": 1 if is_edited else 0,
                 "error_count": 1 if is_error else 0,
                 "origin": input_origin,
@@ -1041,8 +1116,8 @@ def save_語料_to_supabase(
             "q_audio_mime": None,
             "tao_text": r_tao,
             "zh_text": r_zh,
-            "orig_ai_q_tao": orig_ai_q_tao,
             "orig_ai_a_tao": orig_ai_a_tao,
+            "orig_ai_a_zh": orig_ai_a_zh,
             "r_audio_data": None,
             "r_audio_mime": None,
             "is_edited": 1 if is_edited else 0,
@@ -1214,8 +1289,8 @@ def update_existing_conversation(
         is_error=bool(existing_item.get("error_count")),
         is_public=bool(target_public),
         origin=new_origin,
-        orig_ai_q_tao=existing_item.get("orig_ai_q_tao"),
         orig_ai_a_tao=existing_item.get("orig_ai_a_tao"),
+        orig_ai_a_zh=existing_item.get("orig_ai_a_zh"),
     )
     if not ok_save:
         return False, "切換公開／私人狀態時儲存失敗。"
@@ -2511,24 +2586,67 @@ def render_interactive_sentence(
         if len(word_candidates) >= 2:
             with st.popover("🧩 在此句中選取組合登錄為片語", key=f"pop_sel_phrase_{key_prefix}"):
                 picked_indices = st.multiselect(
-                    "勾選要組合成片語的詞彙（依出現順序組合）：",
+                    "勾選要組合成片語的詞彙",
                     options=[i for i, _ in word_candidates],
                     format_func=lambda i: f"{i+1}. {word_candidates[[x for x,_ in word_candidates].index(i)][1]}",
                     key=f"ms_phrase_{key_prefix}",
+                    label_visibility="collapsed",
                 )
+
+                st.markdown("**pipipangayan**")
+                phr_pipi_inp = st.text_input(
+                    "phr_pipi",
+                    value="",
+                    key=f"inp_phr_pipi_{key_prefix}",
+                    label_visibility="collapsed",
+                )
+
+                st.markdown("**解釋**")
                 phr_meaning_inp = st.text_input(
-                    "片語中文解釋（選填）：",
+                    "phr_meaning",
+                    value="",
                     key=f"inp_phr_mean_{key_prefix}",
-                    placeholder="例如：蘭嶼",
+                    label_visibility="collapsed",
                 )
+
+                st.markdown("**語源**")
+                phr_origin_sel = st.radio(
+                    "phr_origin",
+                    PHRASE_ETYMOLOGY_OPTIONS,
+                    index=0,
+                    horizontal=True,
+                    key=f"inp_phr_orig_{key_prefix}",
+                    label_visibility="collapsed",
+                )
+                phr_root_inp = st.text_input(
+                    "詞根組合",
+                    value="",
+                    key=f"inp_phr_root_{key_prefix}",
+                )
+
+                st.markdown("**異體字**")
+                phr_var_inp = st.text_input(
+                    "phr_variants",
+                    value="",
+                    key=f"inp_phr_var_{key_prefix}",
+                    label_visibility="collapsed",
+                )
+
                 if st.button("✅ 登錄為片語", key=f"btn_reg_phr_{key_prefix}"):
                     ordered = [word_candidates[[x for x, _ in word_candidates].index(i)][1] for i in sorted(picked_indices)]
                     joined_phrase = " ".join(ordered)
-                    if register_phrase(joined_phrase, meaning=phr_meaning_inp, source="manual"):
-                        st.success(f"已登錄片語「{joined_phrase}」，點擊文句中對應詞彙即可編輯單字詳情！")
+                    ok_p, msg_p = register_phrase_with_details(
+                        phrase=joined_phrase,
+                        pipipangayan=phr_pipi_inp,
+                        explanation=phr_meaning_inp,
+                        origin_type=phr_origin_sel,
+                        root_combo=phr_root_inp,
+                        variants_note=phr_var_inp,
+                        editor=current_user,
+                    )
+                    if ok_p:
+                        st.success(msg_p)
                         st.rerun()
-                    else:
-                        st.warning("請至少勾選 2 個詞彙。")
 
 
 # --- 6. 雙軌邏輯 ---
@@ -2930,15 +3048,15 @@ if main_menu == "miAI ko / 我要用AI":
                         st.rerun()
 
             elif "beken" in eval_choice:
-                st.warning("⚠ 發現錯誤。您可以修正文字，並保留修正前的 AI 原句：")
+                st.warning("⚠ 發現錯誤。您可以修正文字，並保留修正前的 AI 原始答句與原始中文翻譯：")
 
-                default_orig_ai_q = ai_data.get("user_recognized_tao", q_orig)
                 default_orig_ai_a = ai_data.get("ai_reply_tao", "")
+                default_orig_ai_a_zh = ai_data.get("ai_reply_zh", "")
 
-                st.markdown("**修正前 AI 原句（輸入／辨識）**")
-                orig_ai_q_inp = st.text_input("修正前 AI 輸入／辨識原句：", value=default_orig_ai_q, key="orig_ai_q_input")
-                st.markdown("**修正前 AI 原句（回應）**")
-                orig_ai_a_inp = st.text_input("修正前 AI 回應原句：", value=default_orig_ai_a, key="orig_ai_a_input")
+                st.markdown("**修正前 AI 原始達悟文答句**")
+                orig_ai_a_inp = st.text_input("修正前 AI 原始達悟文答句：", value=default_orig_ai_a, key="orig_ai_a_input")
+                st.markdown("**修正前 AI 答句的原始中文翻譯**")
+                orig_ai_a_zh_inp = st.text_input("修正前 AI 答句的原始中文翻譯：", value=default_orig_ai_a_zh, key="orig_ai_a_zh_input")
 
                 st.markdown("**ablisan o pacici**<br><span style='font-size:14px; opacity:0.8;'>修正【問題】</span>", unsafe_allow_html=True)
                 e_q_tao = st.text_input("修改句子 1 達悟語：", value=ai_data.get("user_recognized_tao", q_orig))
@@ -2953,8 +3071,8 @@ if main_menu == "miAI ko / 我要用AI":
                 if st.button("voka 💾 儲存修正版"):
                     clean_e_q_tao = canon_apostrophes(e_q_tao.strip())
                     clean_e_r_tao = canon_apostrophes(e_r_tao.strip())
-                    clean_orig_ai_q = canon_apostrophes((orig_ai_q_inp or "").strip())
                     clean_orig_ai_a = canon_apostrophes((orig_ai_a_inp or "").strip())
+                    clean_orig_ai_a_zh = (orig_ai_a_zh_inp or "").strip()
                     if save_語料_to_supabase(
                         st.session_state.user_info,
                         bg_info,
@@ -2966,8 +3084,8 @@ if main_menu == "miAI ko / 我要用AI":
                         is_error=True,
                         is_public=is_public_selected,
                         origin=input_origin,
-                        orig_ai_q_tao=clean_orig_ai_q,
                         orig_ai_a_tao=clean_orig_ai_a,
+                        orig_ai_a_zh=clean_orig_ai_a_zh,
                         edit_record=build_edit_record(
                             ai_data, q_orig,
                             clean_e_q_tao, e_q_trans, clean_e_r_tao, e_r_zh,
@@ -3014,8 +3132,8 @@ if main_menu == "miAI ko / 我要用AI":
                     q_zh_val = get_fb_q_zh(item)
                     r_tao_val = item.get("tao_text") or ""
                     r_zh_val = item.get("zh_text") or ""
-                    orig_ai_q_val = item.get("orig_ai_q_tao") or ""
                     orig_ai_a_val = item.get("orig_ai_a_tao") or ""
+                    orig_ai_a_zh_val = item.get("orig_ai_a_zh") or ""
                     item_origin = item.get("origin") or detect_input_origin(q_tao_val)
                     ts_str = str(item.get("timestamp") or "")[:19].replace("T", " ")
                     row_uid = f"{item.get('_source_table')}_{item_id}_{idx_h}"
@@ -3027,8 +3145,8 @@ if main_menu == "miAI ko / 我要用AI":
                         st.markdown(f"**答 (tao_text)**：{r_tao_val}")
                         if r_zh_val:
                             st.caption(f"回應翻譯 (zh_text)：{r_zh_val}")
-                        if orig_ai_q_val or orig_ai_a_val:
-                            st.caption(f"修正前 AI 原句｜問：{orig_ai_q_val}｜答：{orig_ai_a_val}")
+                        if orig_ai_a_val or orig_ai_a_zh_val:
+                            st.caption(f"修正前 AI 原始答句：{orig_ai_a_val}｜原始中文翻譯：{orig_ai_a_zh_val}")
                         st.caption(
                             f"狀態：{pub_badge}｜原始語言 (origin)：{item_origin}｜"
                             f"部落：{item.get('region') or ''}｜年齡：{item.get('age_group') or ''}｜性別：{item.get('gender') or ''}"
@@ -3315,7 +3433,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **公開句子文法檢索與個人／社群單字偏好**：句子只要公開即納入演算法搜尋池，主要參照句中文法；AI 回應中的單字與拼法則優先看個人傾向與社群用例數，盡量採用個人常用或社群高頻的拼法或單字。
         3. **語料庫句子編輯、單字詳情與社群投票**：使用者可編輯語料庫句子以更貼近自然達悟語；點擊任何單字或片語即可查看 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）並按「編輯」修改，查看雙語例句（各詞 1 句）、含異體字總和的用例數與各異體字明細（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
-        4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
+        4. **模型訓練資料來源**：本模型所使用的參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
            * **總統道歉文雅美(達悟)語版**：Tsai, I. W. (2016, August 1). President Tsai Ing-wen's apology to the Indigenous Peoples on behalf of the government [Speech transcript]. Office of the President.
