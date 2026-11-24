@@ -338,6 +338,11 @@ def is_sentence_item(item: dict) -> bool:
 
 @st.cache_data(ttl=300)
 def _load_all_raw_corpus_cached():
+    """
+    載入所有可供演算法搜尋的語料句：
+    1. corpus 語料庫所有句子
+    2. 公開的社群句子（is_public=True 且非待審 is_unverified）：因無句子級社群認證門檻，只要公開即納入演算法搜尋對象
+    """
     corpus_items = []
     try:
         for r in fetch_all_rows("corpus", order=[("id", False)]):
@@ -356,33 +361,41 @@ def _load_all_raw_corpus_cached():
         st.warning(f"⚠️ 讀取 corpus 語料庫提示：{e}")
 
     try:
-        ready_rows = fetch_all_rows("feedback", order=[("id", False)], eq={"is_ready_for_ai": 1})
-        vote_rows = fetch_all_rows("community_votes", "feedback_id, vote_result", order=[("id", False)])
-
-        vote_counts = {}
-        for v in vote_rows:
-            fid = v.get("feedback_id")
-            result = v.get("vote_result")
-            if fid is not None and result == "贊同":
-                vote_counts[fid] = vote_counts.get(fid, 0) + 1
-
-        for r in ready_rows:
-            if not is_public_feedback(r):
+        pub_rows = fetch_all_rows("feedback", order=[("id", False)])
+        for r in pub_rows:
+            if not is_public_feedback(r) or is_unverified(r):
                 continue
             f_id = r.get("id")
-            if vote_counts.get(f_id, 0) >= 15:
+            q_tao = get_fb_q_tao(r)
+            q_zh = get_fb_q_zh(r)
+            r_tao = (r.get("tao_text") or "").strip()
+            r_zh = (r.get("zh_text") or "").strip()
+            provider = r.get("user_id") or "匿名"
+
+            if q_tao and len(q_tao.split()) > 1:
                 corpus_items.append(
                     {
-                        "id": f"Feedback 15人驗證語料 ID #{f_id}",
-                        "tao": r.get("tao_text", ""),
-                        "zh": r.get("zh_text", ""),
-                        "source": f"社群驗證 (提供者: {r.get('user_id', '匿名')})",
+                        "id": f"公開社群語料 ID #{f_id} (問)",
+                        "tao": q_tao,
+                        "zh": q_zh or r_zh,
+                        "source": f"公開社群句子 (提供者: {provider})",
                         "is_feedback": True,
-                        "full_text": f"{r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
+                        "full_text": f"{q_tao} {q_zh}".lower(),
+                    }
+                )
+            if r_tao and len(r_tao.split()) > 1:
+                corpus_items.append(
+                    {
+                        "id": f"公開社群語料 ID #{f_id} (答)",
+                        "tao": r_tao,
+                        "zh": r_zh or q_zh,
+                        "source": f"公開社群句子 (提供者: {provider})",
+                        "is_feedback": True,
+                        "full_text": f"{r_tao} {r_zh}".lower(),
                     }
                 )
     except Exception as e:
-        st.warning(f"⚠️ 讀取社群驗證語料提示：{e}")
+        st.warning(f"⚠️ 讀取公開社群語料提示：{e}")
 
     return corpus_items
 
@@ -1181,13 +1194,28 @@ def update_existing_conversation(
 
 
 def _get_algorithm_sentence_pool(username: str | None = None) -> list[dict]:
-    """取得公開語料句，並僅在有登入帳號時加入該個人帳號自己的私人句子。"""
+    """
+    取得演算法可搜尋句子池：
+    - 語料庫與所有公開社群句子（is_public=True）
+    - 若有登入帳號，再加入該個人帳號自己的私人句子
+    """
     pool = [it for it in load_all_raw_corpus() if is_sentence_item(it)]
     if username:
         for p_item in load_personal_private_corpus(username):
             if p_item.get("owner_id") == username:
                 pool.append(p_item)
     return pool
+
+
+GRAMMAR_MARKERS = {
+    "a", "am", "no", "do", "o", "kano", "ji", "ya", "ko", "mo", "nia",
+    "nire", "ikongo", "akokay", "ayoy", "sirisiring", "macisirisiring",
+    "maniring", "mivatvatek", "mivaliw", "ma'ogto",
+}
+
+
+def _grammar_signature(tokens: list[str]) -> set[str]:
+    return {t for t in tokens if t in GRAMMAR_MARKERS}
 
 
 def search_relevant_corpus(user_input, top_k=3, username=None):
@@ -1201,6 +1229,7 @@ def search_relevant_corpus(user_input, top_k=3, username=None):
         clean_input = user_input.lower().strip()
         user_tokens = [normalize_word(t) for t in user_input.split()]
         user_set = {t for t in user_tokens if t}
+        user_gram = _grammar_signature(user_tokens)
         phrase = " ".join(t for t in user_tokens if t)
 
         scored_items = []
@@ -1208,12 +1237,19 @@ def search_relevant_corpus(user_input, top_k=3, username=None):
             score = 0
             item_words = [normalize_word(t) for t in item["tao"].split()]
             item_set = {t for t in item_words if t}
+            item_gram = _grammar_signature(item_words)
+
             if clean_input in item["full_text"] or (phrase and phrase in " ".join(item_words)):
                 score += 100
 
+            # 文法詞／句型結構匹配權重
+            gram_overlap = len(user_gram & item_gram)
+            if gram_overlap:
+                score += gram_overlap * 15
+
             for kw in user_set:
                 if kw in item_set:
-                    score += 10
+                    score += 12 if kw in GRAMMAR_MARKERS else 8
 
             if score > 0:
                 scored_items.append((score, item))
@@ -1252,18 +1288,24 @@ def algorithm_first_processing(user_text, username=None):
                 "is_algorithm": True,
             }
 
-    user_tokens = {normalize_word(t) for t in user_text.split()} - {""}
+    user_tokens_list = [normalize_word(t) for t in user_text.split()]
+    user_tokens = {t for t in user_tokens_list if t}
+    user_gram = _grammar_signature(user_tokens_list)
+
     best_item = None
-    best_key = (0, 0.0)
+    best_key = (0, 0.0, 0)
     for item in all_corpus:
-        item_tokens = {normalize_word(t) for t in item["tao"].split()} - {""}
+        item_tokens_list = [normalize_word(t) for t in item["tao"].split()]
+        item_tokens = {t for t in item_tokens_list if t}
+        item_gram = _grammar_signature(item_tokens_list)
         matches = len(user_tokens & item_tokens)
+        gram_matches = len(user_gram & item_gram)
         if matches < 2 or not user_tokens:
             continue
         coverage = matches / len(user_tokens)
         jaccard = matches / len(user_tokens | item_tokens)
-        if coverage >= 0.8 and jaccard >= 0.75 and (matches, jaccard) > best_key:
-            best_key = (matches, jaccard)
+        if coverage >= 0.8 and jaccard >= 0.75 and (matches, jaccard, gram_matches) > best_key:
+            best_key = (matches, jaccard, gram_matches)
             best_item = item
 
     if best_item:
@@ -1961,25 +2003,59 @@ def get_variant_policy(user_info, current_text=""):
 
 
 def apply_variant_policy(text, policy):
-    if not text or not policy:
+    """
+    依「個人傾向 ＋ 社群用例數」替換句子中的詞彙／異體字拼法：
+    1. 個人傾向（personal）優先
+    2. 其次社群整體用例數（word_index count + vote tally）與背景偏好（defaults）
+    3. 保留全大寫縮寫（如 AI）不被小寫拼法誤改
+    """
+    if not text:
         return text, {}
+    policy = policy or {}
     group_of = load_vote_data()["group_of"]
+    idx = build_word_index()
+    notes = load_word_notes()
     personal, defaults = policy.get("personal", {}), policy.get("defaults", {})
     out, swaps = [], {}
+
     for tok in text.split():
         lead, core, trail = split_token(tok)
-        w = normalize_word(core) if core else ""
+        if not core or core.isupper():
+            out.append(tok)
+            continue
+
+        w = normalize_word(core)
         root = group_of.get(w)
         target = None
+
         if root in personal:
             target = personal[root]
         elif root in defaults and w not in defaults[root]["pool"]:
             target = defaults[root]["preferred"]
+        else:
+            # 無異體字群組時，若同字根／高頻詞有顯著更高的社群用例數，亦適度向社群高頻靠攏
+            cur_count = idx.get(w, {}).get("count", 0)
+            if cur_count <= 2 and w in notes:
+                cur_desc = _desc_norm(notes[w].get("description"))
+                best_cand = None
+                best_c = cur_count
+                for cand_w, n_info in notes.items():
+                    if cand_w == w or is_loanword(cand_w, notes):
+                        continue
+                    if cur_desc and _desc_norm(n_info.get("description")) == cur_desc:
+                        c_count = idx.get(cand_w, {}).get("count", 0)
+                        if c_count > best_c + 3:
+                            best_c = c_count
+                            best_cand = cand_w
+                if best_cand:
+                    target = best_cand
+
         if target and target != w:
             new = target[:1].upper() + target[1:] if core[:1].isupper() else target
             swaps[core] = new
             tok = f"{lead}{new}{trail}"
         out.append(tok)
+
     return " ".join(out), swaps
 
 
@@ -2425,7 +2501,7 @@ def render_interactive_sentence(
 
 
 # --- 6. 雙軌邏輯 ---
-def process_ai_input(text_prompt=None, username=None):
+def process_ai_input(text_prompt=None, username=None, user_profile=None):
     origin = detect_input_origin(text_prompt)
     roman_tokens = extract_romanized_tokens(text_prompt)
 
@@ -2457,6 +2533,18 @@ def process_ai_input(text_prompt=None, username=None):
     dictionary_context = build_dictionary_context(text_prompt) or "（無）"
     loanword_context = build_loanword_context() or "（無）"
 
+    w_idx = build_word_index()
+    top_comm_words = [
+        f"{w}（用例 {info.get('count', 0)}）"
+        for w, info in sorted(w_idx.items(), key=lambda kv: -kv[1].get("count", 0))[:15]
+    ]
+    community_freq_hint = "、".join(top_comm_words) if top_comm_words else "（無）"
+
+    personal_map = get_personal_choice(username, text_prompt) if username else {}
+    personal_pref_hint = (
+        "、".join(f"→ {v}" for v in personal_map.values()) if personal_map else "（無特定偏好）"
+    )
+
     roman_rule = ""
     if roman_tokens and origin == "zh":
         roman_rule = (
@@ -2466,9 +2554,13 @@ def process_ai_input(text_prompt=None, username=None):
 
     system_prompt = f"""
 你是一個達悟語（Yami/Tao）對話與翻譯助手。目前處於「AI 備援生成」模式。
+公開句子只要進入搜尋池，即主要參照句中的文法與句型結構；但回應中的單字與拼法選用，請優先依循「個人傾向」與「社群用例數」，盡量採用個人常用或社群高頻的拼法或單字。
 
-【唯一合規參考語料庫】:
+【可搜尋語料句（主要參照文法與句型）】:
 {corpus_context}
+
+【個人詞彙／拼法傾向】: {personal_pref_hint}
+【社群高用例數詞彙參考】: {community_freq_hint}
 
 【使用者已校正的單字描述（含語源標註；回應或 etymology 用到這些字時，請沿用對應語源與描述）】:
 {notes_context}
@@ -2668,13 +2760,17 @@ if main_menu == "miAI ko / 我要用AI":
                     ai_data = process_ai_input(
                         text_prompt=text_input,
                         username=st.session_state.user_info["username"],
+                        user_profile=current_bg,
                     )
                     if ai_data:
                         st.session_state.active_q = text_input
                         ai_data = canonicalize_ai_data(ai_data, source_text=text_input)
                         ai_data["sentence_id"] = uuid.uuid4().hex
 
-                        policy = get_variant_policy(st.session_state.user_info, text_input)
+                        policy = get_variant_policy(
+                            {**st.session_state.user_info, **current_bg},
+                            text_input,
+                        )
                         ai_data["ai_reply_tao_raw"] = ai_data.get("ai_reply_tao", "")
                         swapped_tao, swaps = apply_variant_policy(ai_data.get("ai_reply_tao", ""), policy)
                         ai_data["ai_reply_tao"] = preserve_romanized_tokens(swapped_tao, text_input)
@@ -2739,7 +2835,7 @@ if main_menu == "miAI ko / 我要用AI":
             )
             st.markdown(f"<div style='font-size: 14px; opacity: 0.8; margin-top: 10px; margin-bottom: 15px;'>{ai_data.get('ai_reply_zh', '')}</div>", unsafe_allow_html=True)
             if ai_data.get("spelling_swaps"):
-                st.caption("已調整拼法（依您的慣用或一般用法）：" + "、".join(f"{o} → {n}" for o, n in ai_data["spelling_swaps"].items()))
+                st.caption("已依個人傾向與社群用例數調整詞彙／拼法：" + "、".join(f"{o} → {n}" for o, n in ai_data["spelling_swaps"].items()))
             _notes_reply = spellcheck_notes(ai_data.get("ai_reply_tao", ""))
             if _notes_reply:
                 st.caption("🔎 拼寫檢查：" + "；".join(_notes_reply))
@@ -2760,7 +2856,7 @@ if main_menu == "miAI ko / 我要用AI":
             visibility_choice = st.radio(
                 "儲存位置與公開設定：",
                 [
-                    "🌐 公開（存入 feedback，其他使用者可在「看別人用AI」看到）",
+                    "🌐 公開（存入 feedback，其他使用者可在「看別人用AI」看到，並納入公開演算法搜尋）",
                     "🔒 私人（僅存入個人私人紀錄，不寫入 feedback；僅供您自己的演算法讀取）",
                 ],
                 horizontal=True,
@@ -2960,9 +3056,10 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             _raw = load_all_raw_corpus()
             _pending = [it for it in _raw if is_unverified(it)]
             _corpus_only = [it for it in _raw if not it.get("is_feedback") and not is_unverified(it)]
+            _pub_search_only = [it for it in _raw if it.get("is_feedback") and not is_unverified(it)]
             _widx = build_word_index()
             st.markdown(
-                f"- 語料庫：**{len(_corpus_only)}** 筆；已驗證併入的社群語料：**{len(_raw) - len(_corpus_only) - len(_pending)}** 筆；"
+                f"- 語料庫：**{len(_corpus_only)}** 筆；已公開納入演算法搜尋的社群句子：**{len(_pub_search_only)}** 筆；"
                 f"待審的 AI 生成例句：**{len(_pending)}** 筆（不計入用例與比對）\n"
                 f"- 本站不同單字：**{len(_widx)}** 個；用例超過 {HIGHLIGHT_THRESHOLD} 次為黑色一般詞彙（可點擊查看詳情），其餘會標示螢光"
             )
@@ -3127,7 +3224,7 @@ elif main_menu == "amian so AI ori / 關於本站":
 
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
-        2. **片語辨識與互動**：句子中出現如「蘭嶼（pongso no tao）」或已登錄片語組合時，直接於對話文句中視為一個單字單位；滑鼠懸停時整組片語會一起出現黑底線，也可在句子中選取組合登錄片語或僅取消該句的片語合併。
+        2. **公開句子文法檢索與個人／社群單字偏好**：句子只要公開即納入演算法搜尋池，主要參照句中文法；AI 回應中的單字與拼法則優先看個人傾向與社群用例數，盡量採用個人常用或社群高頻的拼法或單字。
         3. **單字詳情與社群投票**：點擊任何單字或片語即可查看 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）並按「編輯」修改，查看雙語例句（各詞 1 句）、含異體字總和的用例數與各異體字明細（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
