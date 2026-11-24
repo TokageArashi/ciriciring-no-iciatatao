@@ -101,6 +101,9 @@ PHRASE_STORE_FILE = ".phrases_store.json"
 AUTO_LOGIN_FILE = ".auto_login_tokens.json"
 WORD_DETAIL_STORE_FILE = ".word_details_store.json"
 
+CORPUS_TAO_COLS = ["tao", "tao_text", "yami", "yami_text", "text_tao", "ciriciring", "sentence_tao", "sentence"]
+CORPUS_ZH_COLS = ["zh", "zh_text", "chinese", "chinese_text", "text_zh", "translation", "meaning", "sentence_zh"]
+
 st.set_page_config(
     page_title="ciriciring no iciatatao", page_icon="🏝️", layout="wide"
 )
@@ -113,6 +116,8 @@ if "auto_login_checked" not in st.session_state:
     st.session_state.auto_login_checked = False
 if "per_sentence_disabled_phrases" not in st.session_state:
     st.session_state.per_sentence_disabled_phrases = {}
+if "pending_session_votes" not in st.session_state:
+    st.session_state.pending_session_votes = []
 
 # 自動關閉拼字檢查 + 片語滑鼠懸停同步黑底線
 components.html(
@@ -264,6 +269,140 @@ def init_supabase() -> Client:
 
 
 supabase = init_supabase()
+
+
+def fetch_all_rows(table, columns="*", order=None, eq=None, page=1000):
+    rows, start = [], 0
+    while True:
+        q = supabase.from_(table).select(columns)
+        for k, v in (eq or {}).items():
+            q = q.eq(k, v)
+        for col, desc in (order or []):
+            q = q.order(col, desc=desc)
+        try:
+            data = q.range(start, start + page - 1).execute().data or []
+        except Exception:
+            if order:
+                return fetch_all_rows(table, columns, None, eq, page)
+            raise
+        rows.extend(data)
+        if len(data) < page:
+            return rows
+        start += page
+
+
+def _first_col(row: dict, cols: list[str]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for c in cols:
+        val = row.get(c)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def get_fb_q_tao(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("q_tao") or row.get("q_original") or "").strip()
+
+
+def get_fb_q_zh(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("q_zh") or row.get("q_trans") or "").strip()
+
+
+def is_public_feedback(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if "is_public" in row and row.get("is_public") is not None:
+        return bool(row.get("is_public"))
+    return True
+
+
+def is_unverified(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return bool(item.get("is_unverified"))
+
+
+def is_sentence_item(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if is_unverified(item):
+        return False
+    tao = (item.get("tao") or "").strip()
+    return bool(tao and len(tao.split()) > 1)
+
+
+@st.cache_data(ttl=300)
+def _load_all_raw_corpus_cached():
+    corpus_items = []
+    try:
+        for r in fetch_all_rows("corpus", order=[("id", False)]):
+            tao = _first_col(r, CORPUS_TAO_COLS)
+            zh = _first_col(r, CORPUS_ZH_COLS)
+            corpus_items.append(
+                {
+                    "id": f"Corpus ID #{r.get('id')}",
+                    "tao": tao,
+                    "zh": zh,
+                    "source": r.get("source") or "語料庫",
+                    "full_text": f"{tao} {zh}".lower(),
+                }
+            )
+    except Exception as e:
+        st.warning(f"⚠️ 讀取 corpus 語料庫提示：{e}")
+
+    try:
+        ready_rows = fetch_all_rows("feedback", order=[("id", False)], eq={"is_ready_for_ai": 1})
+        vote_rows = fetch_all_rows("community_votes", "feedback_id, vote_result", order=[("id", False)])
+
+        vote_counts = {}
+        for v in vote_rows:
+            fid = v.get("feedback_id")
+            result = v.get("vote_result")
+            if fid is not None and result == "贊同":
+                vote_counts[fid] = vote_counts.get(fid, 0) + 1
+
+        for r in ready_rows:
+            if not is_public_feedback(r):
+                continue
+            f_id = r.get("id")
+            if vote_counts.get(f_id, 0) >= 15:
+                corpus_items.append(
+                    {
+                        "id": f"Feedback 15人驗證語料 ID #{f_id}",
+                        "tao": r.get("tao_text", ""),
+                        "zh": r.get("zh_text", ""),
+                        "source": f"社群驗證 (提供者: {r.get('user_id', '匿名')})",
+                        "is_feedback": True,
+                        "full_text": f"{r.get('tao_text', '')} {r.get('zh_text', '')}".lower(),
+                    }
+                )
+    except Exception as e:
+        st.warning(f"⚠️ 讀取社群驗證語料提示：{e}")
+
+    return corpus_items
+
+
+def load_all_raw_corpus():
+    items = _load_all_raw_corpus_cached()
+    if not items:
+        _load_all_raw_corpus_cached.clear()
+    return items
+
+
+load_all_raw_corpus.clear = _load_all_raw_corpus_cached.clear
+
+
+def diagnose_corpus_table() -> dict:
+    try:
+        rows = fetch_all_rows("corpus", limit=5) if False else supabase.from_("corpus").select("*").limit(5).execute().data or []
+        return {"count": len(rows), "error": None}
+    except Exception as e:
+        return {"count": 0, "error": str(e)}
 
 
 # --- 2. 會員機制與自動登入 ---
@@ -419,14 +558,6 @@ def _save_word_details_store(store: dict) -> None:
 
 
 def get_word_detail_record(key: str) -> dict:
-    """
-    取得單字／片語的詳情紀錄：
-    - pipipangayan：預設保留空白（""），讓使用者自行編輯
-    - explanation：中文解釋
-    - origin_type：固有詞 / 新造詞 / 音譯
-    - root_combo：詞根組合（固有詞為選填、新造詞為必填）
-    - loan_lang：何種語言（音譯時必填）
-    """
     k = (key or "").strip().lower()
     store = _load_word_details_cached()
     rec = store.get(k) or {}
@@ -560,11 +691,6 @@ def register_phrase(phrase: str, meaning: str = "", source: str = "manual") -> b
 
 
 def auto_detect_and_save_phrases(tao_text: str, zh_text: str = "") -> list[str]:
-    """
-    自動辨識句子中的片語組合：
-    1. 出現如「蘭嶼（pongso no tao）」或「中文（多詞達悟語）」格式時，自動記錄為片語。
-    2. 若句子中本身包含已登錄的多詞片語，亦記錄。
-    """
     detected = []
     combined = f"{tao_text or ''} {zh_text or ''}"
 
@@ -592,10 +718,6 @@ def get_active_phrases() -> list[dict]:
 
 
 def merge_phrases_in_sentence(sentence: str, sent_key_id: str | None = None) -> tuple[str, dict[str, dict]]:
-    """
-    將句子中符合已登錄片語的多詞序列合併為單一詞元（以底線連接，如 pongso_no_tao），
-    若該片語在此句子已被使用者取消，則不在此句合併。
-    """
     s = sentence or ""
     phrases = sorted(get_active_phrases(), key=lambda x: -len(normalize_phrase_key(x.get("phrase", "")).split()))
     phrase_meta = {}
@@ -926,6 +1048,138 @@ def save_語料_to_supabase(
         return False
 
 
+def delete_feedback_item(feedback_id, current_username):
+    try:
+        res = (
+            supabase.from_("feedback")
+            .select("user_id")
+            .eq("id", feedback_id)
+            .execute()
+        )
+        if not res.data:
+            return False, "找不到該筆資料。"
+
+        owner_id = res.data[0]["user_id"]
+        if current_username != "admin" and owner_id != current_username:
+            return False, "權限不足：您只能刪除自己提供的資料！"
+
+        supabase.from_("feedback").delete().eq("id", feedback_id).execute()
+        build_word_index.clear()
+        load_user_typed_words.clear()
+        load_all_raw_corpus.clear()
+        find_bilingual_examples.clear()
+        return True, "刪除成功！"
+    except Exception as e:
+        return False, f"刪除失敗：{e}"
+
+
+def delete_private_record(item: dict, current_username: str) -> tuple[bool, str]:
+    rec_id = item.get("id")
+    storage = item.get("_storage")
+    if not current_username:
+        return False, "尚未登入。"
+    if storage == "local" or str(rec_id).startswith("local_"):
+        rows = [r for r in _load_local_private_rows(current_username) if r.get("id") != rec_id]
+        _save_local_private_rows(current_username, rows)
+        load_personal_private_corpus.clear()
+        return True, "已刪除私人紀錄！"
+    try:
+        supabase.from_(PRIVATE_TABLE).delete().eq("id", rec_id).eq("user_id", current_username).execute()
+        load_personal_private_corpus.clear()
+        return True, "已刪除私人紀錄！"
+    except Exception as e:
+        return False, f"刪除私人紀錄失敗：{e}"
+
+
+def update_existing_conversation(
+    existing_item: dict,
+    user_info: dict,
+    new_q_tao: str,
+    new_q_zh: str,
+    new_r_tao: str,
+    new_r_zh: str,
+    target_public: bool,
+) -> tuple[bool, str]:
+    username = user_info["username"]
+    was_public = existing_item.get("_source_table") != "private" and is_public_feedback(existing_item)
+    rec_id = existing_item.get("id")
+    new_origin = detect_input_origin(new_q_tao or new_q_zh)
+
+    if was_public == bool(target_public):
+        if was_public:
+            upd = {
+                "q_tao": new_q_tao,
+                "q_zh": new_q_zh,
+                "tao_text": new_r_tao,
+                "zh_text": new_r_zh,
+                "is_edited": 1,
+                "origin": new_origin,
+            }
+            try:
+                supabase.from_("feedback").update(upd).eq("id", rec_id).eq("user_id", username).execute()
+            except Exception:
+                upd.pop("origin", None)
+                if "q_tao" in str(upd):
+                    upd["q_original"] = upd.pop("q_tao")
+                    upd["q_trans"] = upd.pop("q_zh")
+                supabase.from_("feedback").update(upd).eq("id", rec_id).eq("user_id", username).execute()
+            build_word_index.clear()
+            load_user_typed_words.clear()
+            load_all_raw_corpus.clear()
+            find_bilingual_examples.clear()
+            return True, "已更新公開對話紀錄！"
+        else:
+            if existing_item.get("_storage") == "local" or str(rec_id).startswith("local_"):
+                rows = _load_local_private_rows(username)
+                for r in rows:
+                    if r.get("id") == rec_id:
+                        r["q_tao"] = new_q_tao
+                        r["q_zh"] = new_q_zh
+                        r["tao_text"] = new_r_tao
+                        r["zh_text"] = new_r_zh
+                        r["is_edited"] = 1
+                        r["origin"] = new_origin
+                _save_local_private_rows(username, rows)
+            else:
+                supabase.from_(PRIVATE_TABLE).update({
+                    "q_tao": new_q_tao,
+                    "q_zh": new_q_zh,
+                    "tao_text": new_r_tao,
+                    "zh_text": new_r_zh,
+                    "is_edited": 1,
+                    "origin": new_origin,
+                }).eq("id", rec_id).eq("user_id", username).execute()
+            load_personal_private_corpus.clear()
+            return True, "已更新私人對話紀錄！"
+
+    bg_info = {
+        "region": existing_item.get("region") or user_info.get("region"),
+        "age_group": existing_item.get("age_group") or user_info.get("age_group"),
+        "gender": existing_item.get("gender") or user_info.get("gender"),
+    }
+    ok_save = save_語料_to_supabase(
+        user_info=user_info,
+        bg_info=bg_info,
+        q_tao=new_q_tao,
+        q_zh=new_q_zh,
+        r_tao=new_r_tao,
+        r_zh=new_r_zh,
+        is_edited=True,
+        is_error=bool(existing_item.get("error_count")),
+        is_public=bool(target_public),
+        origin=new_origin,
+        orig_ai_q_tao=existing_item.get("orig_ai_q_tao"),
+        orig_ai_a_tao=existing_item.get("orig_ai_a_tao"),
+    )
+    if not ok_save:
+        return False, "切換公開／私人狀態時儲存失敗。"
+    if was_public:
+        delete_feedback_item(rec_id, username)
+    else:
+        delete_private_record(existing_item, username)
+    return True, "已更新內容並切換公開／私人狀態！"
+
+
 def _get_algorithm_sentence_pool(username: str | None = None) -> list[dict]:
     """取得公開語料句，並僅在有登入帳號時加入該個人帳號自己的私人句子。"""
     pool = [it for it in load_all_raw_corpus() if is_sentence_item(it)]
@@ -1091,6 +1345,49 @@ def build_word_index():
 
 
 build_word_index.clear = _build_word_index_cached.clear
+
+
+@st.cache_data(ttl=120)
+def find_bilingual_examples(word_key: str, limit: int = 1) -> list[tuple[str, str]]:
+    w_target = normalize_word(word_key)
+    if not w_target:
+        return []
+    results = []
+    seen = set()
+
+    for it in load_all_raw_corpus():
+        if is_unverified(it):
+            continue
+        tao_s = (it.get("tao") or "").strip()
+        zh_s = (it.get("zh") or "").strip()
+        if not tao_s or not zh_s:
+            continue
+        toks = {normalize_word(t) for t in tao_s.split()}
+        if w_target in toks and tao_s not in seen:
+            seen.add(tao_s)
+            results.append((tao_s, zh_s))
+            if len(results) >= limit:
+                return results
+
+    try:
+        for fb in fetch_all_rows("feedback"):
+            if not is_public_feedback(fb):
+                continue
+            for t_col, z_col in [(get_fb_q_tao(fb), get_fb_q_zh(fb)), (fb.get("tao_text"), fb.get("zh_text"))]:
+                tao_s = (t_col or "").strip()
+                zh_s = (z_col or "").strip()
+                if not tao_s or not zh_s:
+                    continue
+                toks = {normalize_word(t) for t in tao_s.split()}
+                if w_target in toks and tao_s not in seen:
+                    seen.add(tao_s)
+                    results.append((tao_s, zh_s))
+                    if len(results) >= limit:
+                        return results
+    except Exception:
+        pass
+
+    return results
 
 
 # --- 5.5 單字描述校正與異體字判定 ---
@@ -1720,7 +2017,6 @@ def _submit_variant_vote(
     try:
         supabase.from_("community_votes").insert(vote_payload).execute()
     except Exception as fk_err:
-        # 若資料庫欄位仍設為 NOT NULL 且不允許 None，則暫存於 session_state，待句子存入 feedback 後再補寫
         if "null value in column" in str(fk_err).lower() or "23502" in str(fk_err):
             pending_list = st.session_state.setdefault("pending_session_votes", [])
             pending_list.append({
@@ -1805,7 +2101,6 @@ def render_interactive_sentence(
                 corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
                 tag = "hlR" if level == "red" else ("hlY" if level == "yellow" else "hlK")
 
-                # 蒐集所有已登錄的異體字拼法（不論實際使用頻率）
                 group_root = vote_data["group_of"].get(clean_w)
                 all_variants_set = {clean_w}
                 if group_root:
@@ -1915,7 +2210,6 @@ def render_interactive_sentence(
                     else:
                         st.caption("目前網站例句中尚無包含此詞／片語的雙語例句。")
 
-                    # 5. 異體字條目（列出所有已登錄拼法，不論實際使用頻率；點選即送出，選「其他」才出現輸入框）
                     st.divider()
                     st.markdown("**5. 異體字**")
                     for m in variants:
@@ -1941,7 +2235,6 @@ def render_interactive_sentence(
                             label_visibility="collapsed",
                         )
 
-                        # 若點選了已登錄的拼法選項（非「其他」）且與前次不同，立即送出
                         if selected_opt != "其他" and selected_opt != prev_pick:
                             st.session_state[pick_state_key] = selected_opt
                             try:
@@ -2062,9 +2355,9 @@ def process_ai_input(text_prompt=None, username=None):
         if algo_result:
             algo_result["origin"] = origin
             return algo_result
-    ...
-    query_str = text_prompt if text_prompt else ""
-    legal_corpus = search_relevant_corpus(query_str, top_k=3, username=username)
+
+    if not text_prompt:
+        return None
 
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -2074,16 +2367,15 @@ def process_ai_input(text_prompt=None, username=None):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    query_str = text_prompt if text_prompt else ""
-    legal_corpus = search_relevant_corpus(query_str, top_k=3)
+    legal_corpus = search_relevant_corpus(text_prompt, top_k=3, username=username)
     corpus_context = (
         "\n".join(legal_corpus)
         if legal_corpus
         else "【目前尚無合規的參考語料】"
     )
 
-    notes_context = build_notes_context(query_str, *legal_corpus) or "（無）"
-    dictionary_context = build_dictionary_context(query_str) or "（無）"
+    notes_context = build_notes_context(text_prompt, *legal_corpus) or "（無）"
+    dictionary_context = build_dictionary_context(text_prompt) or "（無）"
     loanword_context = build_loanword_context() or "（無）"
 
     roman_rule = ""
@@ -2133,11 +2425,7 @@ def process_ai_input(text_prompt=None, username=None):
 }}
 """
 
-    contents = [system_prompt]
-    if text_prompt:
-        contents.append(f"使用者輸入文字：{text_prompt}")
-    else:
-        return None
+    contents = [system_prompt, f"使用者輸入文字：{text_prompt}"]
 
     max_retries = 2
     for attempt in range(max_retries):
@@ -2298,7 +2586,10 @@ if main_menu == "miAI ko / 我要用AI":
         if st.button("itoro 發送查詢（演算法優先）"):
             if text_input.strip():
                 with st.spinner("⏳ 演算法檢索與備援處理中..."):
-                    ai_data = process_ai_input(text_prompt=text_input)
+                    ai_data = process_ai_input(
+                        text_prompt=text_input,
+                        username=st.session_state.user_info["username"],
+                    )
                     if ai_data:
                         st.session_state.active_q = text_input
                         ai_data = canonicalize_ai_data(ai_data, source_text=text_input)
@@ -2391,7 +2682,7 @@ if main_menu == "miAI ko / 我要用AI":
                 "儲存位置與公開設定：",
                 [
                     "🌐 公開（存入 feedback，其他使用者可在「看別人用AI」看到）",
-                    "🔒 私人（僅存入個人私人紀錄，不寫入 feedback）",
+                    "🔒 私人（僅存入個人私人紀錄，不寫入 feedback；僅供您自己的演算法讀取）",
                 ],
                 horizontal=True,
                 key="save_visibility_radio",
@@ -2517,6 +2808,8 @@ if main_menu == "miAI ko / 我要用AI":
                     q_zh_val = get_fb_q_zh(item)
                     r_tao_val = item.get("tao_text") or ""
                     r_zh_val = item.get("zh_text") or ""
+                    orig_ai_q_val = item.get("orig_ai_q_tao") or ""
+                    orig_ai_a_val = item.get("orig_ai_a_tao") or ""
                     item_origin = item.get("origin") or detect_input_origin(q_tao_val)
                     ts_str = str(item.get("timestamp") or "")[:19].replace("T", " ")
                     row_uid = f"{item.get('_source_table')}_{item_id}_{idx_h}"
@@ -2528,6 +2821,8 @@ if main_menu == "miAI ko / 我要用AI":
                         st.markdown(f"**答 (tao_text)**：{r_tao_val}")
                         if r_zh_val:
                             st.caption(f"回應翻譯 (zh_text)：{r_zh_val}")
+                        if orig_ai_q_val or orig_ai_a_val:
+                            st.caption(f"修正前 AI 原句｜問：{orig_ai_q_val}｜答：{orig_ai_a_val}")
                         st.caption(
                             f"狀態：{pub_badge}｜原始語言 (origin)：{item_origin}｜"
                             f"部落：{item.get('region') or ''}｜年齡：{item.get('age_group') or ''}｜性別：{item.get('gender') or ''}"
@@ -2622,6 +2917,7 @@ elif main_menu == "manita so tao a miAI / 看別人用AI":
             spell_check_word.clear()
             _load_word_details_cached.clear()
             find_bilingual_examples.clear()
+            load_personal_private_corpus.clear()
             st.rerun()
 
     try:
