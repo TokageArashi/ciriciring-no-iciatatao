@@ -399,7 +399,7 @@ load_all_raw_corpus.clear = _load_all_raw_corpus_cached.clear
 
 def diagnose_corpus_table() -> dict:
     try:
-        rows = fetch_all_rows("corpus", limit=5) if False else supabase.from_("corpus").select("*").limit(5).execute().data or []
+        rows = supabase.from_("corpus").select("*").limit(5).execute().data or []
         return {"count": len(rows), "error": None}
     except Exception as e:
         return {"count": 0, "error": str(e)}
@@ -1492,33 +1492,69 @@ def check_variant_proposal(word, alt, rel, shared_desc, notes):
     return True, "", to_save
 
 
+def _describe_word_with_origin(word: str, detail_rec: dict, note: dict | None, glosses: list[str]) -> str:
+    """組合單字語源與詞義描述，避免固有詞與音譯詞同形干擾。"""
+    origin_type = (detail_rec.get("origin_type") or "").strip()
+    expl = (detail_rec.get("explanation") or "").strip() or ((note or {}).get("description") or "").strip()
+    gloss_str = "；".join(glosses[:3]) if glosses else ""
+
+    if not origin_type:
+        if (note or {}).get("tag") == LOANWORD_TAG or "音譯" in expl:
+            origin_type = "音譯"
+        else:
+            origin_type = "固有詞"
+
+    meaning_part = expl or gloss_str or "語意待確認"
+    if origin_type == "音譯" and detail_rec.get("loan_lang"):
+        return f"[語源：音譯（{detail_rec['loan_lang']}）] {meaning_part}"
+    if origin_type == "新造詞" and detail_rec.get("root_combo"):
+        return f"[語源：新造詞（詞根：{detail_rec['root_combo']}）] {meaning_part}"
+    return f"[語源：{origin_type}] {meaning_part}"
+
+
 def build_dictionary_context(text, limit=40):
     idx = build_word_index()
+    notes = load_word_notes()
     lines, seen = [], set()
     for tok in (text or "").split():
         w = normalize_word(tok)
         if not w or w in seen:
             continue
         seen.add(w)
-        gl = idx.get(w, {}).get("glosses")
-        if gl:
-            lines.append(f"- {w}: {'；'.join(gl[:3])}")
+        det = get_word_detail_record(w)
+        gl = idx.get(w, {}).get("glosses", [])
+        if det.get("explanation") or w in notes or gl:
+            lines.append(f"- {tok} ({w}): {_describe_word_with_origin(w, det, notes.get(w), gl)}")
     return "\n".join(lines[:limit])
 
 
 def build_loanword_context(limit=80):
     notes, idx = load_word_notes(), build_word_index()
     group_of = load_vote_data()["group_of"]
+    store = _load_word_details_cached()
     best = {}
+
+    candidate_words = set()
     for w, n in notes.items():
-        if n.get("tag") != LOANWORD_TAG:
+        if n.get("tag") == LOANWORD_TAG or "音譯" in (n.get("description") or ""):
+            candidate_words.add(w)
+    for k, rec in store.items():
+        if rec.get("origin_type") == "音譯":
+            candidate_words.add(normalize_word(k))
+
+    for w in candidate_words:
+        if not w:
             continue
         key = group_of.get(w, w)
         if key not in best or idx.get(w, {}).get("count", 0) > idx.get(best[key], {}).get("count", 0):
             best[key] = w
+
     lines = []
     for w in sorted(best.values(), key=lambda x: -idx.get(x, {}).get("count", 0))[:limit]:
-        lines.append(f"- {w}: {re.sub(r'^華語音譯[：:]', '', notes[w]['description'])}")
+        det = get_word_detail_record(w)
+        desc = det.get("explanation") or re.sub(r"^華語音譯[：:]", "", (notes.get(w) or {}).get("description", ""))
+        lang_hint = f"（{det['loan_lang']}音譯）" if det.get("loan_lang") else "（音譯詞）"
+        lines.append(f"- {w} {lang_hint}: {desc}（注意：若上下文為達悟語固有詞用法，請勿誤套音譯詞義）")
     return "\n".join(lines)
 
 
@@ -1540,15 +1576,17 @@ def register_new_words(ai_data, final_tao, username):
 
 def build_notes_context(*texts, limit=30):
     notes = load_word_notes()
-    if not notes:
+    store = _load_word_details_cached()
+    if not notes and not store:
         return ""
     seen, lines = set(), []
     for t in texts:
         for tok in (t or "").split():
             w = normalize_word(tok)
-            if w in notes and w not in seen:
+            if w and w not in seen and (w in notes or w in store):
                 seen.add(w)
-                lines.append(f"- {w}: {notes[w]['description']}")
+                det = get_word_detail_record(w)
+                lines.append(f"- {tok} ({w}): {_describe_word_with_origin(w, det, notes.get(w), [])}")
     return "\n".join(lines[:limit])
 
 
@@ -1991,7 +2029,7 @@ def _submit_variant_vote(
     current_user: str,
     rel_part: str = "",
 ) -> tuple[bool, str]:
-    """送出單一異體字拼法投票（點選即送出）。"""
+    """送出單一異體字拼法投票（僅在明確點選時送出）。"""
     load_user_votes.clear()
     if skey and (skey, clean_w) in _fetch_user_votes(current_user):
         return False, f"您已對本句的「{w_display}」投過票，無法重複投票。"
@@ -2098,7 +2136,6 @@ def render_interactive_sentence(
                 else:
                     zh_meaning = f"例句翻譯: {example_zh}" if example_zh else (etymology_text or "暫無中文說明")
 
-                corpus_n, comm_n = info.get("corpus", 0), info.get("community", 0)
                 tag = "hlR" if level == "red" else ("hlY" if level == "yellow" else "hlK")
 
                 group_root = vote_data["group_of"].get(clean_w)
@@ -2112,6 +2149,10 @@ def render_interactive_sentence(
                         all_variants_set.add(nw_key)
 
                 usage = {m: word_index.get(m, {}).get("count", 0) for m in all_variants_set}
+                corpus_sum = sum(word_index.get(m, {}).get("corpus", 0) for m in all_variants_set)
+                comm_sum = sum(word_index.get(m, {}).get("community", 0) for m in all_variants_set)
+                total_variant_usage = sum(usage.values())
+
                 votes_n = {m: vote_data["tally"].get(m, 0) for m in all_variants_set}
                 totals = {m: usage[m] + votes_n[m] for m in all_variants_set}
                 others_sorted = sorted([m for m in all_variants_set if m != clean_w], key=lambda m: (-totals[m], m))
@@ -2120,7 +2161,7 @@ def render_interactive_sentence(
                 popover_label = f'<span data-phrase-group="{html.escape(phrase_group_id)}">{html.escape(w)}</span>' if phrase_group_id else w
                 with st.popover(popover_label, key=f"{key_prefix}_{tag}_{idx}"):
                     st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
-                    st.markdown(f"- **用例數**: `{occ_count}` 次（語料庫 {corpus_n} ＋ 社群例句 {comm_n}）")
+                    st.markdown(f"- **用例數（含所有異體字總和）**: `{total_variant_usage}` 次（語料庫 {corpus_sum} ＋ 社群例句 {comm_sum}）")
 
                     if p_info and current_user:
                         if st.button("✂️ 取消此句中的片語組合", key=f"btn_cancel_sent_phr_{key_prefix}_{idx}"):
@@ -2128,78 +2169,109 @@ def render_interactive_sentence(
                             st.success(f"已取消本句中的片語「{p_info['phrase']}」（其他句子不受影響）。")
                             st.rerun()
 
-                    st.divider()
-                    st.markdown("**1. pipipangayan（達悟文的解釋）**")
-                    inp_pipi = st.text_input(
-                        "pipipangayan",
-                        value=detail_rec["pipipangayan"],
-                        key=f"pipi_{key_prefix}_{idx}",
-                        label_visibility="collapsed",
-                    )
-
-                    st.markdown("**2. 解釋**")
-                    inp_expl = st.text_input(
-                        "解釋",
-                        value=zh_meaning if zh_meaning != "暫無中文說明" else "",
-                        key=f"expl_{key_prefix}_{idx}",
-                        label_visibility="collapsed",
-                    )
-
-                    st.markdown("**3. 語源**")
                     cur_origin_type = detail_rec["origin_type"] if detail_rec["origin_type"] in ETYMOLOGY_OPTIONS else "固有詞"
-                    sel_origin_type = st.radio(
-                        "語源類型",
-                        ETYMOLOGY_OPTIONS,
-                        index=ETYMOLOGY_OPTIONS.index(cur_origin_type),
-                        horizontal=True,
-                        key=f"orig_type_{key_prefix}_{idx}",
-                        label_visibility="collapsed",
-                    )
-                    inp_root_combo = ""
-                    inp_loan_lang = ""
-                    if sel_origin_type == "固有詞":
-                        inp_root_combo = st.text_input(
-                            "詞根組合（選填）",
-                            value=detail_rec["root_combo"],
-                            placeholder="選填詞根組合",
-                            key=f"root_opt_{key_prefix}_{idx}",
-                        )
-                    elif sel_origin_type == "新造詞":
-                        inp_root_combo = st.text_input(
-                            "詞根組合（必填）*",
-                            value=detail_rec["root_combo"],
-                            placeholder="請填寫詞根組合（必填）",
-                            key=f"root_req_{key_prefix}_{idx}",
-                        )
-                    elif sel_origin_type == "音譯":
-                        inp_loan_lang = st.text_input(
-                            "何種語言（必填）*",
-                            value=detail_rec["loan_lang"],
-                            placeholder="例如：華語、日語、英語（必填）",
-                            key=f"lang_req_{key_prefix}_{idx}",
+                    edit_mode_key = f"word_detail_edit_mode_{key_prefix}_{idx}"
+                    is_editing = bool(st.session_state.get(edit_mode_key, False))
+
+                    st.divider()
+                    st.markdown(f"- **pipipangayan（達悟文解釋）**：{detail_rec['pipipangayan'] or '（尚未填寫）'}")
+                    st.markdown(f"- **解釋**：{zh_meaning}")
+                    origin_extra = ""
+                    if cur_origin_type == "新造詞" and detail_rec["root_combo"]:
+                        origin_extra = f"（詞根組合：{detail_rec['root_combo']}）"
+                    elif cur_origin_type == "音譯" and detail_rec["loan_lang"]:
+                        origin_extra = f"（語言：{detail_rec['loan_lang']}）"
+                    elif cur_origin_type == "固有詞" and detail_rec["root_combo"]:
+                        origin_extra = f"（詞根組合：{detail_rec['root_combo']}）"
+                    st.markdown(f"- **語源**：{cur_origin_type}{origin_extra}")
+
+                    if current_user and not is_editing:
+                        if st.button("✏️ 編輯單字詳情", key=f"btn_enter_edit_{key_prefix}_{idx}"):
+                            st.session_state[edit_mode_key] = True
+                            st.rerun()
+
+                    if current_user and is_editing:
+                        st.markdown("**1. pipipangayan（達悟文的解釋）**")
+                        inp_pipi = st.text_input(
+                            "pipipangayan",
+                            value=detail_rec["pipipangayan"],
+                            key=f"pipi_{key_prefix}_{idx}",
+                            label_visibility="collapsed",
                         )
 
-                    if current_user:
-                        if st.button("💾 儲存單字詳情", key=f"btn_save_detail_{key_prefix}_{idx}"):
-                            ok_d, msg_d = save_word_detail_record(
-                                key=clean_w,
-                                pipipangayan=inp_pipi,
-                                explanation=inp_expl,
-                                origin_type=sel_origin_type,
-                                root_combo=inp_root_combo,
-                                loan_lang=inp_loan_lang,
-                                editor=current_user,
+                        st.markdown("**2. 解釋**")
+                        inp_expl = st.text_input(
+                            "解釋",
+                            value=zh_meaning if zh_meaning != "暫無中文說明" else "",
+                            key=f"expl_{key_prefix}_{idx}",
+                            label_visibility="collapsed",
+                        )
+
+                        st.markdown("**3. 語源**")
+                        sel_origin_type = st.radio(
+                            "語源類型",
+                            ETYMOLOGY_OPTIONS,
+                            index=ETYMOLOGY_OPTIONS.index(cur_origin_type),
+                            horizontal=True,
+                            key=f"orig_type_{key_prefix}_{idx}",
+                            label_visibility="collapsed",
+                        )
+                        inp_root_combo = ""
+                        inp_loan_lang = ""
+                        if sel_origin_type == "固有詞":
+                            inp_root_combo = st.text_input(
+                                "詞根組合（選填）",
+                                value=detail_rec["root_combo"],
+                                placeholder="選填詞根組合",
+                                key=f"root_opt_{key_prefix}_{idx}",
                             )
-                            if ok_d:
-                                if inp_expl.strip():
-                                    try:
-                                        save_word_note(clean_w, inp_expl.strip(), current_user)
-                                    except Exception:
-                                        pass
-                                st.success(msg_d)
+                        elif sel_origin_type == "新造詞":
+                            inp_root_combo = st.text_input(
+                                "詞根組合（必填）*",
+                                value=detail_rec["root_combo"],
+                                placeholder="請填寫詞根組合（必填）",
+                                key=f"root_req_{key_prefix}_{idx}",
+                            )
+                        elif sel_origin_type == "音譯":
+                            inp_loan_lang = st.text_input(
+                                "何種語言（必填）*",
+                                value=detail_rec["loan_lang"],
+                                placeholder="例如：華語、日語、英語（必填）",
+                                key=f"lang_req_{key_prefix}_{idx}",
+                            )
+
+                        col_s, col_c = st.columns(2)
+                        with col_s:
+                            if st.button("💾 儲存單字詳情", key=f"btn_save_detail_{key_prefix}_{idx}"):
+                                ok_d, msg_d = save_word_detail_record(
+                                    key=clean_w,
+                                    pipipangayan=inp_pipi,
+                                    explanation=inp_expl,
+                                    origin_type=sel_origin_type,
+                                    root_combo=inp_root_combo,
+                                    loan_lang=inp_loan_lang,
+                                    editor=current_user,
+                                )
+                                if ok_d:
+                                    if inp_expl.strip():
+                                        try:
+                                            save_word_note(
+                                                clean_w,
+                                                inp_expl.strip(),
+                                                current_user,
+                                                tag=LOANWORD_TAG if sel_origin_type == "音譯" else None,
+                                            )
+                                        except Exception:
+                                            pass
+                                    st.session_state[edit_mode_key] = False
+                                    st.success(msg_d)
+                                    st.rerun()
+                                else:
+                                    st.error(msg_d)
+                        with col_c:
+                            if st.button("取消", key=f"btn_cancel_edit_{key_prefix}_{idx}"):
+                                st.session_state[edit_mode_key] = False
                                 st.rerun()
-                            else:
-                                st.error(msg_d)
 
                     st.divider()
                     st.markdown("**4. 例句（雙語）**")
@@ -2224,38 +2296,45 @@ def render_interactive_sentence(
                         st.caption("點選喜歡的拼法即送出；若要登錄新的拼法，請點選「其他」：")
                         choice_options = variants + ["其他"]
                         pick_state_key = f"var_pick_state_{key_prefix}_{idx}"
-                        prev_pick = st.session_state.get(pick_state_key)
+                        radio_key = f"w_choice_{key_prefix}_{idx}"
+
+                        if pick_state_key not in st.session_state:
+                            st.session_state[pick_state_key] = None
+                            st.session_state[radio_key] = None
 
                         selected_opt = st.radio(
                             "選擇拼法或其他",
                             choice_options,
-                            index=choice_options.index(prev_pick) if prev_pick in choice_options else 0,
-                            key=f"w_choice_{key_prefix}_{idx}",
+                            key=radio_key,
                             horizontal=True,
                             label_visibility="collapsed",
                         )
 
-                        if selected_opt != "其他" and selected_opt != prev_pick:
+                        prev_recorded = st.session_state.get(pick_state_key)
+                        if selected_opt is not None and selected_opt != prev_recorded:
                             st.session_state[pick_state_key] = selected_opt
-                            try:
-                                ok_v, msg_v = _submit_variant_vote(
-                                    clean_w=clean_w,
-                                    w_display=w,
-                                    pick=selected_opt,
-                                    skey=skey,
-                                    sentence_id=sentence_id,
-                                    fb_id=fb_id,
-                                    current_user=current_user,
-                                )
-                                if ok_v:
-                                    st.success(msg_v)
-                                    st.rerun()
-                                else:
-                                    st.warning(msg_v)
-                            except Exception as vote_err:
-                                st.error(f"投票失敗：{vote_err}")
-                        elif selected_opt == "其他":
-                            st.session_state[pick_state_key] = "其他"
+                            if selected_opt != "其他":
+                                try:
+                                    ok_v, msg_v = _submit_variant_vote(
+                                        clean_w=clean_w,
+                                        w_display=w,
+                                        pick=selected_opt,
+                                        skey=skey,
+                                        sentence_id=sentence_id,
+                                        fb_id=fb_id,
+                                        current_user=current_user,
+                                    )
+                                    if ok_v:
+                                        st.success(msg_v)
+                                        st.rerun()
+                                    else:
+                                        st.warning(msg_v)
+                                except Exception as vote_err:
+                                    st.error(f"投票失敗：{vote_err}")
+                            else:
+                                st.rerun()
+
+                        if selected_opt == "其他":
                             w_alt_input = st.text_input(
                                 "輸入新的異體字拼法（單一單字）：",
                                 key=f"w_alt_{key_prefix}_{idx}",
@@ -2391,21 +2470,21 @@ def process_ai_input(text_prompt=None, username=None):
 【唯一合規參考語料庫】:
 {corpus_context}
 
-【使用者已校正的單字描述（以此為準；回應或 etymology 用到這些字時，請沿用此描述）】:
+【使用者已校正的單字描述（含語源標註；回應或 etymology 用到這些字時，請沿用對應語源與描述）】:
 {notes_context}
 
-【單字表釋義（詞典；若與上面使用者校正的描述衝突，以校正描述為準）】:
+【單字表釋義（詞典；含語源標註，若與上面使用者校正的描述衝突，以校正描述為準）】:
 {dictionary_context}
 
-【現代借詞表（社群已採用；遇到這些概念請直接使用，不要另創新詞）】:
+【現代借詞表（社群已採用；遇到同形詞如 ai / AI 或 ito 等，請依上下文語意區分固有詞與音譯詞，不可誤判）】:
 {loanword_context}
 
 【絕對強制規則】：
 1. 請勿在生成的達悟語句子中包含任何如 `[使用者推薦]` 或 `[AI自創]` 的文字標籤，保持句子乾淨。
-2. etymology 必須是一個 JSON 物件 (Dictionary)，鍵為達悟語單字，值為該單字的中文翻譯與語源說明（例如：{{"akokay": "你好 / 傳統問候語", "vani": "眼睛 / 傳統詞彙"}}）。絕不可回傳字串。
+2. etymology 必須是一個 JSON 物件 (Dictionary)，鍵為達悟語單字，值為該單字的語源與中文翻譯說明（例如：{{"akokay": "[固有詞] 你好 / 傳統問候語", "ito": "[固有詞] 他、那個（另見音譯詞棉線）"}}）。絕不可回傳字串。
 3. 喉塞音（glottal stop）一律使用半形撇號 '（U+0027）書寫，例如 ma'ogto；不要改用 ’ ‘ ʼ ʻ ` 等其他符號，也不要自行增減喉塞音。
-4. 遇到達悟語沒有對應詞的現代概念（例如 演算法、網際網路），絕對不要自創達悟語詞彙。一律以華語（國語）的發音音譯，並依達悟語書寫系統的字母書寫（例如 電腦→tennaw、電話→dingwa、國中→kocong、高中→kawcong、國小→kosiaw）。「現代借詞表」已有的詞請直接使用。
-5. 音譯而來的新詞請列在 new_words（鍵為音譯後的達悟語字，值為華語原詞；沒有就回傳空物件 {{}}），並在 etymology 中寫「華語音譯：華語原詞」。{roman_rule}
+4. 遇到達悟語沒有對應詞的現代概念（例如 演算法、網際網路），絕對不要自創達悟語詞彙。一律以華語（國語）的發音音譯，並依達悟語書寫系統的字母書寫（例如 電腦→tennaw、電話→dingwa、國中→kocong、高中→kawcong、國小→kosiaw）。「現代借詞表」已有的詞請直接使用，但若遇到與達悟語固有詞同音或同拼法者，必須依句子語意避免混淆。
+5. 音譯而來的新詞請列在 new_words（鍵為音譯後的達悟語字，值為華語原詞；沒有就回傳空物件 {{}}），並在 etymology 中寫明「[音譯] 華語音譯：華語原詞」。{roman_rule}
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -2415,7 +2494,7 @@ def process_ai_input(text_prompt=None, username=None):
   "ai_reply_tao": "達悟語回應句子",
   "ai_reply_zh": "回應之中文翻譯",
   "etymology": {{
-     "關鍵單字": "中文翻譯與語源說明"
+     "關鍵單字": "[語源] 中文翻譯與語源說明"
   }},
   "new_words": {{
      "音譯後的達悟語字": "華語原詞"
@@ -3049,7 +3128,7 @@ elif main_menu == "amian so AI ori / 關於本站":
         ### 系統特色
         1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
         2. **片語辨識與互動**：句子中出現如「蘭嶼（pongso no tao）」或已登錄片語組合時，直接於對話文句中視為一個單字單位；滑鼠懸停時整組片語會一起出現黑底線，也可在句子中選取組合登錄片語或僅取消該句的片語合併。
-        3. **單字詳情與社群投票**：點擊任何單字或片語即可編輯 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯），查看雙語例句（各詞 1 句）、用例數與所有已登錄異體字（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
+        3. **單字詳情與社群投票**：點擊任何單字或片語即可查看 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）並按「編輯」修改，查看雙語例句（各詞 1 句）、含異體字總和的用例數與各異體字明細（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
         4. **模型訓練資料來源**：本模型所使用的訓練與參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
