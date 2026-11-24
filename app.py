@@ -3423,13 +3423,14 @@ elif main_menu == "amian so AI ori / 關於本站":
     st.markdown(
         """
         ### 專案願景
-        本平台致力於保存與推廣**達悟語（Yami/Tao）**，結合演算法優先匹配與備援 LLM 模型，建構即時雙向的文字語意互動系統。
+        本平台致力於保存與推廣**達悟語（Yami/Tao）**，使用演算法與Gemini 3.6模型，建構即時雙向的文字語意互動系統。
 
         ### 系統特色
-        1. **智慧螢光筆標註**：用例超過 10 次的詞彙維持黑色顯示（仍可點擊查看詳情）；低用例或使用者輸入字顯示**黃色螢光筆**；語料庫與網站中未曾出現且非使用者輸入的 AI 生成字顯示**紅色螢光筆**（直接採納後自動轉為黃色）。
-        2. **公開句子文法檢索與個人／社群單字偏好**：句子只要公開即納入演算法搜尋池，主要參照句中文法；AI 回應中的單字與拼法則優先看個人傾向與社群用例數，盡量採用個人常用或社群高頻的拼法或單字。
-        3. **語料庫句子編輯、單字詳情與社群投票**：使用者可編輯語料庫句子以更貼近自然達悟語；點擊任何單字或片語即可查看 `pipipangayan`、解釋、語源（固有詞／新造詞／音譯）並按「編輯」修改，查看雙語例句（各詞 1 句）、含異體字總和的用例數與各異體字明細（點選喜歡的拼法即送出，選「其他」才出現輸入框）。
-        4. **模型訓練資料來源**：本模型所使用的參考資料皆來自 [FormosanBank](https://github.com/FormosanBank/FormosanBank/tree/main)，包含以下重要來源：
+        1. **單字詳情**：公開用例超過 10 次的詞彙或片語無標記；低用例詞彙或片語顯示**黃色螢光記號**；未被使用者確認的AI 生成字顯示**紅色螢光記號**，若使用者採納則自動轉為黃色記號。點擊單字可察看單字詳情，包含用例數、達悟文解釋、中文解釋、語源、雙語例句、異體字登錄等條目。
+        2. **演算法與回應**：句子只要公開即納入演算法搜尋池，使用者可隨時刪除或編輯自己輸入過的句子。AI 回應中使用的詞彙與拼法則參考個人傾向與社群用例數，盡量採用個人常用或使用者所屬社群的拼法或單字。若有設為私人的不公開句子，也會納入個人演算法運算，然不會讓公開的演算法運算。
+        3. **自由編輯與社群參與**：使用者可編輯AI生成的回應、語料庫中的句子、單字詳情，並且本平台開放使用者登錄已知詞彙、片語或創造新詞，使用者可透過公開自己的句子讓其他使用者看到該詞，讓其他使用者決定是否同意或使用該詞彙。
+        4. **資料來源**：本網站所使用的參考資料，包含以下來源：
+           * **FormosanBank: https://github.com/FormosanBank/FormosanBank/tree/main
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
            * **原語會族語線上辭典雅美(達悟)語版**：Council of Indigenous Peoples, & Indigenous Languages Research and Development Foundation. (2024, January). 原住民族語言線上辭典: 雅美語. Executing Institution: National Taiwan Normal University. https://e-dictionary.ilrdf.org.tw/
            * **總統道歉文雅美(達悟)語版**：Tsai, I. W. (2016, August 1). President Tsai Ing-wen's apology to the Indigenous Peoples on behalf of the government [Speech transcript]. Office of the President.
