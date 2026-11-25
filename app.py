@@ -23,8 +23,8 @@ def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
     size_zh = "16px" if is_title else "14px"
     return f"""
     <div style="margin-bottom: 8px;">
-        <div style="font-size: {size_tao}; font-weight: bold; color: var(--text-color, #F3F4F6); line-height: 1.3;">{tao}</div>
-        <div style="font-size: {size_zh}; color: var(--secondary-text-color, #9CA3AF); line-height: 1.2;">{zh}</div>
+        <div style="font-size: {size_tao}; font-weight: bold; line-height: 1.3;">{tao}</div>
+        <div style="font-size: {size_zh}; opacity: 0.7; line-height: 1.2;">{zh}</div>
     </div>
     """
 
@@ -168,6 +168,25 @@ components.html(
 st.markdown(
     """
     <style>
+    /* ========================================================= */
+    /* 1. 深淺色模式字體顏色設定                                   */
+    /* ========================================================= */
+    
+    /* 預設／淺色（白色）模式：字體顯示黑色 */
+    body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+        color: #000000;
+    }
+
+    /* 系統與深色（黑色）模式：字體顯示白色 */
+    @media (prefers-color-scheme: dark) {
+        body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+            color: #FFFFFF;
+        }
+    }
+
+    /* ========================================================= */
+    /* 2. 元件基本樣式                                            */
+    /* ========================================================= */
     div[role='radiogroup'] label { font-size: 20px !important; font-weight: bold !important; padding: 5px !important; }
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
@@ -193,7 +212,11 @@ st.markdown(
     :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) > :is(.element-container, [data-testid="stElementContainer"]) [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
     .tao-w, .tao-punct, .tao-lead { font-size: 20px; font-weight: bold; line-height: 2.0; }
 
-    /* 黑色一般詞彙也可點擊查看單字詳情 */
+    /* ========================================================= */
+    /* 3. 單字與螢光標註按鈕樣式                                    */
+    /* ========================================================= */
+    
+    /* 黑色一般詞彙點擊按鈕：文字跟隨主題色 */
     [class*="_hlK_"] button {
         border: none !important;
         box-shadow: none !important;
@@ -211,16 +234,16 @@ st.markdown(
     [class*="_hlK_"] button p { font-size: 20px !important; margin: 0 !important; }
     [class*="_hlK_"] button svg, [class*="_hlK_"] button [data-testid="stIconMaterial"] { display: none !important; }
     [class*="_hlK_"] button:hover {
-        background-color: rgba(17, 24, 39, 0.08) !important;
-        text-decoration: underline solid #111827 2px;
+        background-color: rgba(128, 128, 128, 0.2) !important;
+        text-decoration: underline solid currentColor 2px;
         text-underline-offset: 4px;
     }
 
-    /* 黃色／紅色詞彙按鈕樣式 */
+    /* 黃色／紅色螢光詞彙按鈕：底色較亮，強制文字保持深色(#111827)以維護對比度 */
     [class*="_hlY_"] button, [class*="_hlR_"] button {
         border: none !important;
         box-shadow: none !important;
-        color: inherit !important;
+        color: #111827 !important;
         height: auto !important;
         min-height: unset !important;
         padding: 0 0.25em !important;
@@ -230,19 +253,20 @@ st.markdown(
         border-radius: 4px !important;
         cursor: pointer;
     }
-    [class*="_hlY_"] button p, [class*="_hlR_"] button p { font-size: 20px !important; margin: 0 !important; }
+    [class*="_hlY_"] button p, [class*="_hlR_"] button p { font-size: 20px !important; color: #111827 !important; margin: 0 !important; }
     [class*="_hlY_"] button svg, [class*="_hlR_"] button svg,
     [class*="_hlY_"] button [data-testid="stIconMaterial"], [class*="_hlR_"] button [data-testid="stIconMaterial"] { display: none !important; }
-    [class*="_hlY_"] button { background-color: rgba(250, 204, 21, 0.55) !important; }
-    [class*="_hlY_"] button:hover { background-color: rgba(250, 204, 21, 0.85) !important; }
-    [class*="_hlR_"] button { background-color: rgba(239, 68, 68, 0.50) !important; }
-    [class*="_hlR_"] button:hover { background-color: rgba(239, 68, 68, 0.80) !important; }
+    [class*="_hlY_"] button { background-color: rgba(250, 204, 21, 0.75) !important; }
+    [class*="_hlY_"] button:hover { background-color: rgba(250, 204, 21, 0.95) !important; }
+    [class*="_hlR_"] button { background-color: rgba(239, 68, 68, 0.70) !important; color: #FFFFFF !important; }
+    [class*="_hlR_"] button p { color: #FFFFFF !important; }
+    [class*="_hlR_"] button:hover { background-color: rgba(239, 68, 68, 0.90) !important; }
 
-    /* 片語滑鼠懸停時組合中各字一起出現黑底線 */
+    /* 片語滑鼠懸停時組合中各字同步底線 */
     .phrase-hover-active,
     .phrase-hover-active button,
     :is([class*="_hlY_"], [class*="_hlR_"], [class*="_hlK_"]):has([data-phrase-group].phrase-hover-active) button {
-        text-decoration: underline solid #111827 2.5px !important;
+        text-decoration: underline solid currentColor 2.5px !important;
         text-underline-offset: 4px !important;
     }
     </style>
@@ -254,7 +278,7 @@ st.markdown(
     """
     <div style='text-align: center; padding-top: 5px; padding-bottom: 15px;'>
         <h1 style='font-size: 42px; font-weight: bold; color: #3B82F6;'>ciriciring no iciatatao</h1>
-        <div style='font-size: 24px; color: #9CA3AF; font-weight: 600;'>眾語</div>
+        <div style='font-size: 24px; opacity: 0.7; font-weight: 600;'>眾語</div>
     </div>
 """,
     unsafe_allow_html=True,
@@ -3423,10 +3447,10 @@ elif main_menu == "amian so AI ori / 關於本站":
     st.markdown(
         """
         ### 專案願景
-        本平台致力於保存與推廣**達悟語（Yami/Tao）**，使用演算法與Gemini 3.6模型，建構即時雙向的文字語意互動系統。
+        本平台致力於保存與推廣達悟語（Yami/Tao），使用演算法與Gemini 3.6模型，建構即時雙向的文字語意互動系統。
 
         ### 系統特色
-        1. **單字詳情**：公開用例超過 10 次的詞彙或片語無標記；低用例詞彙或片語顯示**黃色螢光記號**；未被使用者確認的AI 生成字顯示**紅色螢光記號**，若使用者採納則自動轉為黃色記號。點擊單字可察看單字詳情，包含用例數、達悟文解釋、中文解釋、語源、雙語例句、異體字登錄等條目。
+        1. **單字詳情**：公開用例超過 10 次的詞彙或片語無標記；低用例詞彙或片語顯示黃色螢光記號；未被使用者確認的AI 生成字顯示紅色螢光記號，若使用者採納則自動轉為黃色記號。點擊單字可察看單字詳情，包含用例數、達悟文解釋、中文解釋、語源、雙語例句、異體字登錄等條目。
         2. **演算法與回應**：句子只要公開即納入演算法搜尋池，使用者可隨時刪除或編輯自己輸入過的句子。AI 回應中使用的詞彙與拼法則參考個人傾向與社群用例數，盡量採用個人常用或使用者所屬社群的拼法或單字。若有設為私人的不公開句子，也會納入個人演算法運算，然不會讓公開的演算法運算。
         3. **自由編輯與社群參與**：使用者可編輯AI生成的回應、語料庫中的句子、單字詳情，並且本平台開放使用者登錄已知詞彙、片語或創造新詞，使用者可透過公開自己的句子讓其他使用者看到該詞，讓其他使用者決定是否同意或使用該詞彙。
         4. **資料來源**：本網站所使用的參考資料，包含以下來源：
