@@ -165,35 +165,32 @@ components.html(
     height=0,
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
-/* 1. 預設與 Streamlit 原生主題（利用原生 CSS 變數，自動跟隨系統與 Streamlit 設定） */
-body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
-    color: var(--text-color, #000000);
-}
-
-/* 2. 強制淺色（白色）模式：字體一律為黑色 (排除螢光標記按鈕) */
-@media (prefers-color-scheme: light) {
+    /* ========================================================= */
+    /* 1. 主題自適應字體顏色（支援系統主題與 Streamlit 主題切換） */
+    /* ========================================================= */
     body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
-        color: #000000 !important;
+        color: var(--text-color, #000000);
     }
-}
 
-/* 3. 強制深色（暗黑）模式：字體一律為白色 (排除螢光標記按鈕) */
-@media (prefers-color-scheme: dark) {
-    body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
-        color: #FFFFFF !important;
+    @media (prefers-color-scheme: light) {
+        body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+            color: #000000 !important;
+        }
     }
-}
 
-/* 4. 特殊保護：螢光黃/螢光紅底色的按鈕或標記，文字必須維持黑色，否則在亮色底上會看不清 */
-.highlight-yellow, .highlight-red, 
-button[kind="secondary"] {
-    color: #111827 !important;
-}
-</style>
-""", unsafe_allow_html=True)
+    @media (prefers-color-scheme: dark) {
+        body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+            color: #FFFFFF !important;
+        }
+    }
 
+    .highlight-yellow, .highlight-red,
+    button[kind="secondary"] {
+        color: #111827 !important;
+    }
 
     /* ========================================================= */
     /* 2. 元件基本樣式                                            */
@@ -202,7 +199,7 @@ button[kind="secondary"] {
     .stButton>button { width: 100%; height: 2.8em; font-size: 18px !important; }
     .stTextInput input { font-size: 18px !important; }
     input, textarea { spellcheck: false !important; -webkit-spellcheck: false !important; }
-    
+
     :is(div[class*="st-key-sent_"], div[class*="st-key-sent_"] > [data-testid="stVerticalBlock"]) {
         display: flex !important;
         flex-direction: row !important;
@@ -226,8 +223,6 @@ button[kind="secondary"] {
     /* ========================================================= */
     /* 3. 單字與螢光標註按鈕樣式                                    */
     /* ========================================================= */
-    
-    /* 黑色一般詞彙點擊按鈕：文字跟隨主題色 */
     [class*="_hlK_"] button {
         border: none !important;
         box-shadow: none !important;
@@ -250,7 +245,6 @@ button[kind="secondary"] {
         text-underline-offset: 4px;
     }
 
-    /* 黃色／紅色螢光詞彙按鈕：底色較亮，強制文字保持深色(#111827)以維護對比度 */
     [class*="_hlY_"] button, [class*="_hlR_"] button {
         border: none !important;
         box-shadow: none !important;
@@ -273,14 +267,13 @@ button[kind="secondary"] {
     [class*="_hlR_"] button p { color: #FFFFFF !important; }
     [class*="_hlR_"] button:hover { background-color: rgba(239, 68, 68, 0.90) !important; }
 
-    /* 片語滑鼠懸停時組合中各字同步底線 */
     .phrase-hover-active,
     .phrase-hover-active button,
     :is([class*="_hlY_"], [class*="_hlR_"], [class*="_hlK_"]):has([data-phrase-group].phrase-hover-active) button {
         text-decoration: underline solid currentColor 2.5px !important;
         text-underline-offset: 4px !important;
     }
-    </style>
+</style>
 """,
     unsafe_allow_html=True,
 )
