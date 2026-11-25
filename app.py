@@ -3061,7 +3061,7 @@ def render_interactive_sentence(
                                 key=f"lang_req_{key_prefix}_{idx}",
                             )
 
-col_s, col_c = st.columns(2)
+                    col_s, col_c = st.columns(2)
                     with col_s:
                         if st.button("💾 儲存單字詳情", key=f"btn_save_detail_{key_prefix}_{idx}"):
                             ok_d, msg_d = save_word_detail_record(
