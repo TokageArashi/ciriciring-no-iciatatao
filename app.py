@@ -2970,16 +2970,10 @@ def render_interactive_sentence(
 
                 popover_label = f'<span data-phrase-group="{html.escape(phrase_group_id)}">{html.escape(w)}</span>' if phrase_group_id else w
                 with st.popover(popover_label, key=f"{key_prefix}_{tag}_{idx}"):
-                    st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
-                    st.markdown(f"- **用例數（含所有異體字總和）**: `{total_variant_usage}` 次（語料庫 {corpus_sum} ＋ 社群例句 {comm_sum}）")
-
-is_red_ai_word = (level == "red") and bool(is_ai_generated)
+                    is_red_ai_word = (level == "red") and bool(is_ai_generated)
                     detail_rec = get_word_detail_record(clean_w, is_ai_red_word=is_red_ai_word)
                     is_ai_word = is_red_ai_word or (detail_rec.get("first_user") == "AI 生成")
-
-                    st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
-                    st.markdown(f"- **用例數（含所有異體字總和）**: `{total_variant_usage}` 次（語料庫 {corpus_sum} ＋ 社群例句 {comm_sum}）")
-
+    
                     # 初次使用條目（不可編輯）
                     st.markdown(f"- **初次使用**：`{detail_rec['first_user']}`（使用日期：{detail_rec['first_date']}）＊不可編輯")
 
