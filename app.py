@@ -412,7 +412,6 @@ def is_sentence_item(item: dict) -> bool:
 
 
 def update_corpus_sentence(corpus_row: dict, new_tao: str, new_zh: str, editor: str) -> tuple[bool, str]:
-    """更新語料庫（corpus）中的句子，讓語料更接近自然的達悟語。"""
     cid = corpus_row.get("id")
     if cid is None:
         return False, "找不到語料庫句子 ID。"
@@ -457,7 +456,6 @@ def _save_local_reactions(rows: list[dict]) -> None:
 
 @st.cache_data(ttl=30)
 def load_sentence_reactions() -> list[dict]:
-    """讀取所有句子的讚／倒讚紀錄（供後台演算法與前台計數使用；前台不顯示原因明細）。"""
     rows = []
     seen_sigs = set()
     try:
@@ -530,10 +528,6 @@ def record_sentence_reaction(
     reaction: str,
     reasons: list[str] | None = None,
 ) -> tuple[bool, str, str | None]:
-    """
-    儲存使用者的讚或倒讚（含後台原因），並檢查嚴重倒讚是否達 2 次而強制轉私人。
-    回傳：(成功, 前台顯示訊息, 強制轉私人的原因或 None)
-    """
     if not user_info or not user_info.get("username"):
         return False, "請先登入後再進行按讚或倒讚。", None
 
@@ -598,16 +592,6 @@ def evaluate_sentence_policy(
     user_bg: dict | None,
     fb_id: int | str | None = None,
 ) -> tuple[bool, float, str | None]:
-    """
-    評估單一句子在演算法中的可用性、權重加成／扣減，以及是否強制轉私人：
-    - 嚴重原因（涉及隱私、內容不實且可能混淆視聽、恐嚇/誹謗/謾罵）三種分開計算：
-      * 任一原因達 2 次 -> 強制永久改為私人，且停止所有使用者參考
-      * 任一原因 >= 1 次 -> 立即停止在所有使用者的演算法中參考該句
-    - 倒讚者本人 -> 不再使用此句做參考
-    - 「不認同觀點」 -> 不影響整體演算法
-    - 「文法混亂」、「用詞不當」、「達悟文與中文不一致」三者合併計算 >= 5 人 -> 統計倒讚者類型，減少該類型使用者對話中參考此句
-    - 按讚 -> 增加演算法使用該句的機率，尤其是按讚者與其所屬類型
-    """
     fb_str = f"fb_{fb_id}" if fb_id is not None else ""
     recs = [
         r for r in reactions
@@ -658,11 +642,6 @@ def evaluate_sentence_policy(
 
 @st.cache_data(ttl=300)
 def _load_all_raw_corpus_cached():
-    """
-    載入所有可供演算法搜尋的語料句：
-    1. corpus 語料庫所有句子
-    2. 公開的社群句子（is_public=True 且非待審 is_unverified）
-    """
     corpus_items = []
     try:
         for r in fetch_all_rows("corpus", order=[("id", False)]):
@@ -863,6 +842,7 @@ try_auto_login_from_device()
 
 # --- 2.5 單字／片語詳情儲存與片語辨識 ---
 ETYMOLOGY_OPTIONS = ["固有詞", "新造詞", "音譯"]
+AI_ETYMOLOGY_OPTIONS = ["新造詞", "音譯"]
 PHRASE_ETYMOLOGY_OPTIONS = ["固有詞", "新造詞"]
 
 DEFAULT_AUTO_PHRASES = [
@@ -897,10 +877,47 @@ def _save_word_details_store(store: dict) -> None:
         _load_word_details_cached.clear()
 
 
+def get_first_use_info(word_key: str) -> tuple[str, str]:
+    """
+    查詢單字的「初次使用」來源與日期（不可編輯）：
+    - 若此字為 AI 產生且使用者直接採用，回傳 ("AI 生成", 日期)
+    - 若為使用者輸入/提案，回傳 (使用者帳號, 日期)
+    - 若來自語料庫，回傳 ("語料庫", 日期)
+    """
+    k = normalize_word(word_key)
+    store = _load_word_details_cached()
+    rec = store.get(k) or {}
+    if rec.get("first_user") and rec.get("first_date"):
+        return rec["first_user"], rec["first_date"]
+
+    notes = load_word_notes()
+    n_info = notes.get(k)
+    if n_info:
+        editor = n_info.get("editor") or "語料庫"
+        date_str = str(n_info.get("created_at") or "")[:10] or datetime.date.today().isoformat()
+        if "AI生成" in editor or "AI" in editor:
+            return "AI 生成", date_str
+        return editor, date_str
+
+    for item in load_all_raw_corpus():
+        if item.get("is_feedback"):
+            toks = {normalize_word(t) for t in f"{item.get('tao', '')} {item.get('zh', '')}".split()}
+            if k in toks:
+                provider = item.get("source", "").replace("公開社群句子 (提供者: ", "").replace(")", "").strip()
+                return provider or "社群使用者", datetime.date.today().isoformat()
+        else:
+            toks = {normalize_word(t) for t in (item.get("tao") or "").split()}
+            if k in toks:
+                return "語料庫", "更早"
+
+    return "語料庫", datetime.date.today().isoformat()
+
+
 def get_word_detail_record(key: str) -> dict:
     k = (key or "").strip().lower()
     store = _load_word_details_cached()
     rec = store.get(k) or {}
+    first_u, first_d = get_first_use_info(k)
     return {
         "pipipangayan": rec.get("pipipangayan", ""),
         "explanation": rec.get("explanation", ""),
@@ -910,6 +927,8 @@ def get_word_detail_record(key: str) -> dict:
         "variants_note": rec.get("variants_note", ""),
         "editor": rec.get("editor", ""),
         "updated_at": rec.get("updated_at", ""),
+        "first_user": rec.get("first_user") or first_u,
+        "first_date": rec.get("first_date") or first_d,
     }
 
 
@@ -922,6 +941,8 @@ def save_word_detail_record(
     loan_lang: str,
     editor: str,
     variants_note: str = "",
+    first_user: str | None = None,
+    first_date: str | None = None,
 ) -> tuple[bool, str]:
     k = (key or "").strip().lower()
     if not k:
@@ -934,6 +955,8 @@ def save_word_detail_record(
         return False, "選擇「音譯」時，何種語言為必填欄位。"
 
     store = _load_word_details_store()
+    cur = store.get(k, {})
+    fu, fd = get_first_use_info(k)
     store[k] = {
         "pipipangayan": (pipipangayan or "").strip(),
         "explanation": (explanation or "").strip(),
@@ -943,6 +966,8 @@ def save_word_detail_record(
         "variants_note": (variants_note or "").strip(),
         "editor": editor,
         "updated_at": datetime.datetime.now().isoformat(),
+        "first_user": cur.get("first_user") or first_user or fu,
+        "first_date": cur.get("first_date") or first_date or fd,
     }
     _save_word_details_store(store)
     return True, "已儲存單字詳情！"
@@ -990,6 +1015,7 @@ def register_phrase_with_details(
 
     detail_store = _load_word_details_store()
     merged_key = "_".join(key.split())
+    now_d = datetime.date.today().isoformat()
     detail_store[merged_key] = {
         "pipipangayan": (pipipangayan or "").strip(),
         "explanation": (explanation or "").strip(),
@@ -999,6 +1025,8 @@ def register_phrase_with_details(
         "variants_note": (variants_note or "").strip(),
         "editor": editor,
         "updated_at": datetime.datetime.now().isoformat(),
+        "first_user": editor or "使用者",
+        "first_date": now_d,
     }
     _save_word_details_store(detail_store)
 
@@ -1098,6 +1126,8 @@ def register_phrase(phrase: str, meaning: str = "", source: str = "manual") -> b
             cur.setdefault("root_combo", "")
             cur.setdefault("loan_lang", "")
             cur.setdefault("variants_note", "")
+            cur.setdefault("first_user", "自動辨識")
+            cur.setdefault("first_date", datetime.date.today().isoformat())
             detail_store[merged_key] = cur
             _save_word_details_store(detail_store)
     return True
@@ -1230,7 +1260,6 @@ def _save_local_private_rows(username: str, rows: list[dict]) -> None:
 
 
 def save_private_record(private_payload: dict) -> bool:
-    """將私人紀錄存入 Supabase private_feedback，並同步寫入本地備援快取。"""
     username = private_payload["user_id"]
     payload = dict(private_payload)
     saved_cloud = False
@@ -1264,7 +1293,6 @@ def save_private_record(private_payload: dict) -> bool:
 
 
 def fetch_user_private_records(username: str) -> list[dict]:
-    """讀取指定帳號的私人紀錄，合併雲端與本地備援並去重，確保重新開啟網站仍可看見。"""
     if not username:
         return []
     combined = []
@@ -1319,7 +1347,6 @@ def fetch_user_private_records(username: str) -> list[dict]:
 
 @st.cache_data(ttl=120)
 def load_personal_private_corpus(username: str | None) -> list[dict]:
-    """僅讀取指定個人帳號（username）的私人句子，供該帳號自己的演算法使用。"""
     if not username:
         return []
     items = []
@@ -1679,12 +1706,72 @@ def open_save_confirmation_dialog():
             st.rerun()
 
 
+# --- 移除/解斷異體字彈出對話框 ---
+@st.dialog("確認此兩字非異體字")
+def confirm_unlink_variant_dialog(target_word: str, current_word: str):
+    st.markdown(f"**請確認「{target_word}」與「{current_word}」並非異體字。**")
+
+    st.divider()
+    st.markdown(f"**1. 「{target_word}」的雙語例句：**")
+    exs_a = find_bilingual_examples(target_word, limit=3)
+    if exs_a:
+        for t_s, z_s in exs_a:
+            st.markdown(f"- {t_s}  \n  *{z_s}*")
+    else:
+        st.caption("無搜尋到包含此字的例句。")
+
+    st.markdown(f"**2. 「{current_word}」的雙語例句：**")
+    exs_b = find_bilingual_examples(current_word, limit=3)
+    if exs_b:
+        for t_s, z_s in exs_b:
+            st.markdown(f"- {t_s}  \n  *{z_s}*")
+    else:
+        st.caption("無搜尋到包含此字的例句。")
+
+    st.divider()
+    c_yes, c_no = st.columns(2)
+    with c_yes:
+        if st.button("✅ 確認移除異體字關聯", key="btn_confirm_unlink_var_yes"):
+            try:
+                supabase.from_("word_variants").delete().or_(
+                    f"and(word_a.eq.{target_word},word_b.eq.{current_word}),and(word_a.eq.{current_word},word_b.eq.{target_word})"
+                ).execute()
+            except Exception:
+                pass
+            load_vote_data.clear()
+            load_variant_stats.clear()
+            st.success(f"已取消「{target_word}」與「{current_word}」的異體字關聯。")
+            st.session_state.pop("unlink_variant_target", None)
+            st.rerun()
+    with c_no:
+        if st.button("取消", key="btn_confirm_unlink_var_no"):
+            st.session_state.pop("unlink_variant_target", None)
+            st.rerun()
+
+
+def remove_variant_link(target_word: str, current_word: str, has_votes: bool):
+    """
+    執行異體字移除：
+    - 若無人投票：直接刪除該異體字
+    - 若有人投票：跳出雙語例句比對確認對話框
+    """
+    if not has_votes:
+        try:
+            supabase.from_("word_variants").delete().or_(
+                f"and(word_a.eq.{target_word},word_b.eq.{current_word}),and(word_a.eq.{current_word},word_b.eq.{target_word})"
+            ).execute()
+        except Exception:
+            pass
+        load_vote_data.clear()
+        load_variant_stats.clear()
+        st.toast(f"已從列表移除異體字「{target_word}」。", icon="🗑️")
+        st.rerun()
+    else:
+        st.session_state["unlink_variant_target"] = (target_word, current_word)
+        st.rerun()
+
+
 def _get_algorithm_sentence_pool(username: str | None = None, user_bg: dict | None = None) -> list[dict]:
-    """
-    取得演算法可搜尋句子池（套用讚／倒讚、原因門檻與嚴重倒讚封鎖）：
-    - 語料庫與公開社群句子（is_public=True），排除被嚴重倒讚或本人倒讚的句子，並套用讚／倒讚權重
-    - 若有登入帳號，再加入該個人帳號自己的私人句子
-    """
     reactions = load_sentence_reactions()
     pool = []
 
@@ -1904,7 +1991,7 @@ build_word_index.clear = _build_word_index_cached.clear
 
 
 @st.cache_data(ttl=120)
-def find_bilingual_examples(word_key: str, limit: int = 1) -> list[tuple[str, str]]:
+def find_bilingual_examples(word_key: str, limit: int = 3) -> list[tuple[str, str]]:
     w_target = normalize_word(word_key)
     if not w_target:
         return []
@@ -2010,11 +2097,11 @@ def link_is_valid(a, b, rel, notes):
     db = (notes.get(b) or {}).get("description")
     if rel == "spelling":
         if da and db and _desc_norm(da) != _desc_norm(db):
-            return False
-        return spelling_similar(a, b)
+            return False, False
+        return spelling_similar(a, b), True
     if rel == "translation":
-        return bool(da and db and _desc_norm(da) == _desc_norm(db))
-    return False
+        return bool(da and db and _desc_norm(da) == _desc_norm(db)), True
+    return False, False
 
 
 def check_variant_proposal(word, alt, rel, shared_desc, notes):
@@ -2114,17 +2201,44 @@ def build_loanword_context(limit=80):
 
 
 def register_new_words(ai_data, final_tao, username):
+    """
+    對 AI 生成的新詞進行登記：
+    - 強制附帶中文解釋
+    - 語源限制為「新造詞」或「音譯」
+    - 若為「達悟語詞綴 ＋ 音譯語」，標記為新造詞並說明組合
+    - 若使用者未更改直接採納，在單字詳情標記初次使用為「AI 生成」
+    """
     new_words = ai_data.get("new_words") if isinstance(ai_data, dict) else None
     if not isinstance(new_words, dict) or not new_words:
         return
     notes = load_word_notes()
     present = {normalize_word(t) for t in (final_tao or "").split()}
+    now_date = datetime.date.today().isoformat()
+
     for tao_w, zh in new_words.items():
         w = normalize_word(tao_w)
         if not w or not zh or w not in present or w in notes:
             continue
+
+        zh_expl = zh if isinstance(zh, str) and zh.strip() else "AI 建議對應漢譯"
+        is_affixed_loan = bool(re.search(r"^(ma|mi|maci|ipi|ka|pa|i)[a-z]+", w) and len(w) > 5)
+        origin_type = "新造詞" if is_affixed_loan else "音譯"
+        root_combo = f"達悟語詞綴 + 華語音譯（原詞：{zh_expl}）" if is_affixed_loan else ""
+        loan_lang = "華語" if origin_type == "音譯" else ""
+
         try:
-            save_word_note(w, f"華語音譯：{zh}", f"AI生成（{username} 採納）", tag=LOANWORD_TAG)
+            save_word_note(w, f"華語音譯：{zh_expl}", "AI生成（使用者採納）", tag=LOANWORD_TAG if origin_type == "音譯" else None)
+            save_word_detail_record(
+                key=w,
+                pipipangayan="",
+                explanation=zh_expl,
+                origin_type=origin_type,
+                root_combo=root_combo,
+                loan_lang=loan_lang,
+                editor=username,
+                first_user="AI 生成",
+                first_date=now_date,
+            )
         except Exception:
             pass
 
@@ -2283,10 +2397,12 @@ def load_vote_data():
         find(word)
         if pick:
             tally[pick] = tally.get(pick, 0) + 1
-            if pick != word and rel and link_is_valid(word, pick, rel, notes):
-                ra, rb = find(word), find(pick)
-                if ra != rb:
-                    parent[rb] = ra
+            if pick != word and rel:
+                is_valid, _ = link_is_valid(word, pick, rel, notes)
+                if is_valid:
+                    ra, rb = find(word), find(pick)
+                    if ra != rb:
+                        parent[rb] = ra
         rows.append((v.get("voter_id"), pick, v.get("region"), v.get("age_group"), v.get("gender")))
 
     try:
@@ -2645,88 +2761,6 @@ def _submit_variant_vote(
     return True, f"🎉 已投給「{pick}」！"
 
 
-def render_sentence_reaction_bar(
-    sent_key: str,
-    fb_id: int | str | None,
-    current_user_info: dict | None,
-    all_reactions: list[dict],
-):
-    """
-    渲染單一句子的按讚／倒讚按鈕與計數：
-    - 前台僅顯示讚數與倒讚數，不顯示任何原因或評語內容
-    - 按倒讚時展開原因複選（不認同觀點、文法混亂、用詞不當、達悟文與中文不一致、涉及隱私、內容不實且可能混淆視聽、恐嚇/誹謗/謾罵）
-    """
-    fb_str = f"fb_{fb_id}" if fb_id is not None else ""
-    recs = [
-        r for r in all_reactions
-        if r.get("sentence_key") == sent_key
-        or (fb_str and r.get("sentence_key") == fb_str)
-        or (fb_id is not None and str(r.get("feedback_id") or "") == str(fb_id))
-    ]
-    like_count = sum(1 for r in recs if r.get("reaction") == "like")
-    dislike_count = sum(1 for r in recs if r.get("reaction") == "dislike")
-
-    open_dislike_key = f"open_dislike_box_{sent_key}"
-    if open_dislike_key not in st.session_state:
-        st.session_state[open_dislike_key] = False
-
-    c_like, c_dislike, c_info = st.columns([1.2, 1.2, 4.6])
-    with c_like:
-        if st.button(f"👍 讚 ({like_count})", key=f"btn_like_{sent_key}"):
-            if not current_user_info:
-                st.warning("請先登入後再按讚。")
-            else:
-                ok_rx, msg_rx, _ = record_sentence_reaction(
-                    fb_id=fb_id,
-                    sent_key=sent_key,
-                    user_info=current_user_info,
-                    reaction="like",
-                    reasons=[],
-                )
-                if ok_rx:
-                    st.session_state[open_dislike_key] = False
-                    st.toast(msg_rx, icon="👍")
-                    st.rerun()
-
-    with c_dislike:
-        if st.button(f"👎 倒讚 ({dislike_count})", key=f"btn_dislike_{sent_key}"):
-            if not current_user_info:
-                st.warning("請先登入後再按倒讚。")
-            else:
-                st.session_state[open_dislike_key] = not st.session_state[open_dislike_key]
-                st.rerun()
-
-    with c_info:
-        st.caption(f"👍 {like_count} ｜ 👎 {dislike_count}")
-
-    if st.session_state.get(open_dislike_key) and current_user_info:
-        with st.container(border=True):
-            st.markdown("**請選擇倒讚原因（可複選，原因僅保存於後台，前台不公開）：**")
-            selected_reasons = st.multiselect(
-                "倒讚原因",
-                options=DISLIKE_REASONS,
-                key=f"ms_dislike_reasons_{sent_key}",
-                label_visibility="collapsed",
-            )
-            if st.button("送出倒讚原因", key=f"btn_submit_dislike_reasons_{sent_key}"):
-                if not selected_reasons:
-                    st.warning("請至少勾選一項倒讚原因。")
-                else:
-                    ok_rx, msg_rx, forced_reason = record_sentence_reaction(
-                        fb_id=fb_id,
-                        sent_key=sent_key,
-                        user_info=current_user_info,
-                        reaction="dislike",
-                        reasons=selected_reasons,
-                    )
-                    if ok_rx:
-                        st.session_state[open_dislike_key] = False
-                        st.toast(msg_rx, icon="👎")
-                        if forced_reason:
-                            st.rerun()
-                        st.rerun()
-
-
 def render_interactive_sentence(
     sentence,
     is_ai_generated=False,
@@ -2803,8 +2837,10 @@ def render_interactive_sentence(
                 for nw_key in notes.keys():
                     if nw_key == clean_w or (group_root and vote_data["group_of"].get(nw_key) == group_root):
                         all_variants_set.add(nw_key)
-                    elif nw_key != clean_w and spelling_similar(clean_w, nw_key) and link_is_valid(clean_w, nw_key, "spelling", notes):
-                        all_variants_set.add(nw_key)
+                    elif nw_key != clean_w:
+                        is_sim, _ = link_is_valid(clean_w, nw_key, "spelling", notes)
+                        if is_sim:
+                            all_variants_set.add(nw_key)
 
                 usage = {m: word_index.get(m, {}).get("count", 0) for m in all_variants_set}
                 corpus_sum = sum(word_index.get(m, {}).get("corpus", 0) for m in all_variants_set)
@@ -2820,6 +2856,9 @@ def render_interactive_sentence(
                 with st.popover(popover_label, key=f"{key_prefix}_{tag}_{idx}"):
                     st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
                     st.markdown(f"- **用例數（含所有異體字總和）**: `{total_variant_usage}` 次（語料庫 {corpus_sum} ＋ 社群例句 {comm_sum}）")
+
+                    # 初次使用條目（不可編輯）
+                    st.markdown(f"- **初次使用**：`{detail_rec['first_user']}`（使用日期：{detail_rec['first_date']}）＊不可編輯")
 
                     if p_info and current_user:
                         if st.button("✂️ 取消此句中的片語組合", key=f"btn_cancel_sent_phr_{key_prefix}_{idx}"):
@@ -2866,10 +2905,12 @@ def render_interactive_sentence(
                         )
 
                         st.markdown("**3. 語源**")
+                        opt_list = AI_ETYMOLOGY_OPTIONS if level == "red" else ETYMOLOGY_OPTIONS
+                        default_idx = opt_list.index(cur_origin_type) if cur_origin_type in opt_list else 0
                         sel_origin_type = st.radio(
                             "語源類型",
-                            ETYMOLOGY_OPTIONS,
-                            index=ETYMOLOGY_OPTIONS.index(cur_origin_type),
+                            opt_list,
+                            index=default_idx,
                             horizontal=True,
                             key=f"orig_type_{key_prefix}_{idx}",
                             label_visibility="collapsed",
@@ -2885,9 +2926,9 @@ def render_interactive_sentence(
                             )
                         elif sel_origin_type == "新造詞":
                             inp_root_combo = st.text_input(
-                                "詞根組合（必填）*",
+                                "詞根組合（必填，若為詞綴+音譯請註明）*",
                                 value=detail_rec["root_combo"],
-                                placeholder="請填寫詞根組合（必填）",
+                                placeholder="例如：ma-（詞綴）+ tenchi（日語音譯）",
                                 key=f"root_req_{key_prefix}_{idx}",
                             )
                         elif sel_origin_type == "音譯":
@@ -2941,12 +2982,21 @@ def render_interactive_sentence(
                         st.caption("目前網站例句中尚無包含此詞／片語的雙語例句。")
 
                     st.divider()
-                    st.markdown("**5. 異體字**")
+                    st.markdown("**5. 異體字與管理**")
                     for m in variants:
                         mark = "（本句）" if m == clean_w else ""
                         desc_m = (notes.get(m) or {}).get("description") or "；".join(word_index.get(m, {}).get("glosses", []))
                         desc_part = f"〔{desc_m}〕" if desc_m else ""
                         st.markdown(f"- **{m}**{mark}{desc_part}（用例 {usage[m]}｜投票 {votes_n[m]}｜總計 {totals[m]}）")
+
+                        if m != clean_w and current_user:
+                            btn_unlink_key = f"btn_unlink_var_{key_prefix}_{idx}_{m}"
+                            if st.button(f"🚫 這不是異體字（移除 {m}）", key=btn_unlink_key):
+                                remove_variant_link(
+                                    target_word=m,
+                                    current_word=clean_w,
+                                    has_votes=votes_n[m] > 0,
+                                )
 
                     if enable_word_voting and current_user and skey and (skey, clean_w) in my_votes:
                         st.info(f"✅ 您已對本句的「{w}」投過票了")
@@ -3201,7 +3251,7 @@ def process_ai_input(text_prompt=None, username=None, user_profile=None):
 2. etymology 必須是一個 JSON 物件 (Dictionary)，鍵為達悟語單字，值為該單字的語源與中文翻譯說明（例如：{{"akokay": "[固有詞] 你好 / 傳統問候語", "ito": "[固有詞] 他、那個（另見音譯詞棉線）"}}）。絕不可回傳字串。
 3. 喉塞音（glottal stop）一律使用半形撇號 '（U+0027）書寫，例如 ma'ogto；不要改用 ’ ‘ ʼ ʻ ` 等其他符號，也不要自行增減喉塞音。
 4. 遇到達悟語沒有對應詞的現代概念（例如 演算法、網際網路），絕對不要自創達悟語詞彙。一律以華語（國語）的發音音譯，並依達悟語書寫系統的字母書寫（例如 電腦→tennaw、電話→dingwa、國中→kocong、高中→kawcong、國小→kosiaw）。「現代借詞表」已有的詞請直接使用，但若遇到與達悟語固有詞同音或同拼法者，必須依句子語意避免混淆。
-5. 音譯而來的新詞請列在 new_words（鍵為音譯後的達悟語字，值為華語原詞；沒有就回傳空物件 {{}}），並在 etymology 中寫明「[音譯] 華語音譯：華語原詞」。{roman_rule}
+5. 音譯或詞綴組合而來的新詞（new_words）必須強制附帶中文解釋（鍵為達悟語字，值為華語原詞中文解釋），語源必須標註為「新造詞」或「音譯」，並說明詞根組合或音譯語言。若為「達悟語詞綴＋音譯語」，必須標為「新造詞」。{roman_rule}
 
 【輸出格式】：
 請嚴格以 JSON 格式輸出：
@@ -3214,7 +3264,7 @@ def process_ai_input(text_prompt=None, username=None, user_profile=None):
      "關鍵單字": "[語源] 中文翻譯與語源說明"
   }},
   "new_words": {{
-     "音譯後的達悟語字": "華語原詞"
+     "音譯後的達悟語字": "華語原詞中文解釋"
   }},
   "is_ai_generated": true,
   "reference": "必須明確列出引用的語料庫ID與出處"
@@ -3338,6 +3388,10 @@ if st.session_state.get("last_save_toast"):
 
 if st.session_state.get("pending_save_payload"):
     open_save_confirmation_dialog()
+
+if st.session_state.get("unlink_variant_target"):
+    t_word, c_word = st.session_state["unlink_variant_target"]
+    confirm_unlink_variant_dialog(t_word, c_word)
 
 
 # --- 8. 主頁面區塊 ---
@@ -3472,7 +3526,7 @@ if main_menu == "miAI ko / 我要用AI":
             if _notes_reply:
                 st.caption("🔎 拼寫檢查：" + "；".join(_notes_reply))
 
-            # --- 語料品質評估（置於「參考資料 / 語料來源」上方，方便直接點擊儲存） ---
+            # --- 語料品質評估（置於「參考資料 / 語料來源」上方） ---
             st.divider()
             st.markdown(dual_text("o kapakaapiya no ciring", "語料品質評估", is_title=True), unsafe_allow_html=True)
 
@@ -3560,7 +3614,7 @@ if main_menu == "miAI ko / 我要用AI":
                     }
                     open_save_confirmation_dialog()
 
-            # --- 參考資料 / 語料來源（置於「語料品質評估」下方） ---
+            # --- 參考資料 / 語料來源 ---
             st.markdown(
                 f"""
                 <div style="padding: 15px; border-radius: 8px; margin-top: 12px; margin-bottom: 10px; border: 1px solid rgba(128, 128, 128, 0.3);">
@@ -3571,7 +3625,7 @@ if main_menu == "miAI ko / 我要用AI":
                 unsafe_allow_html=True,
             )
 
-        # --- 使用者自己的歷史對話紀錄（含編輯、公開/私人切換、刪除） ---
+        # --- 使用者歷史對話紀錄 ---
         st.divider()
         st.markdown(dual_text("no ciriciring mo a nimareng", "我的歷史對話紀錄", is_title=True), unsafe_allow_html=True)
         try:
@@ -3918,9 +3972,9 @@ elif main_menu == "amian so AI ori / 關於本站":
         本平台致力於保存與推廣達悟語（Yami/Tao），使用演算法與Gemini 3.6模型，建構即時雙向的文字語意互動系統。
 
         ### 系統特色
-        1. **單字詳情**：公開用例超過 10 次的詞彙或片語無標記；低用例詞彙或片語顯示黃色螢光記號；未被使用者確認的AI 生成字顯示紅色螢光記號，若使用者採納則自動轉為黃色記號。點擊單字可察看單字詳情，包含用例數、達悟文解釋、中文解釋、語源、雙語例句、異體字登錄等條目。
+        1. **單字詳情與初次使用**：公開用例超過 10 次的詞彙或片語無標記；低用例詞彙或片語顯示黃色螢光記號；未被使用者確認的AI 生成字顯示紅色螢光記號，若使用者採納則自動轉為黃色記號。點擊單字可察看單字詳情，包含用例數、初次使用來源（AI生成/提案使用者帳號/語料庫）與日期、達悟文解釋、中文解釋、語源、雙語例句、異體字管理等條目。
         2. **演算法與回應**：句子只要公開即納入演算法搜尋池，使用者可隨時刪除或編輯自己輸入過的句子。AI 回應中使用的詞彙與拼法則參考個人傾向與社群用例數，盡量採用個人常用或使用者所屬社群的拼法或單字。若有設為私人的不公開句子，也會納入個人演算法運算，然不會讓公開的演算法運算。
-        3. **自由編輯與社群參與**：使用者可編輯AI生成的回應、語料庫中的句子、單字詳情，並且本平台開放使用者登錄已知詞彙、片語或創造新詞，使用者可透過公開自己的句子讓其他使用者看到該詞，讓其他使用者決定是否同意或使用該詞彙。
+        3. **自由編輯與社群參與**：使用者可編輯AI生成的回應、語料庫中的句子、單字詳情，並且本平台開放使用者登錄已知詞彙、片語或創造新詞，使用者可透過公開自己的句子讓其他使用者看到該詞，讓其他使用者決定是否同意或使用該詞彙。異體字列表提供「這不是異體字」機制，有人投票的異體字會在比對雙語例句並警示確認後再行解斷。
         4. **資料來源**：本網站所使用的參考資料，包含以下來源：
            * **FormosanBank: https://github.com/FormosanBank/FormosanBank/tree/main
            * **族語E樂園雅美(達悟)語版**：Indigenous Languages Research and Development Foundation. (2020). 族語E樂園. https://web.klokah.tw/
