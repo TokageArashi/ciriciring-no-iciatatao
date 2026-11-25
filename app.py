@@ -3061,53 +3061,39 @@ def render_interactive_sentence(
                                 key=f"lang_req_{key_prefix}_{idx}",
                             )
 
-                        col_s, col_c = st.columns(2)
-                        with col_s:
-                            if st.button("💾 儲存單字詳情", key=f"btn_save_detail_{key_prefix}_{idx}"):
-                                ok_d, msg_d = save_word_detail_record(
-                                    key=clean_w,
-                                    pipipangayan=inp_pipi,
-                                    explanation=inp_expl,
-                                    origin_type=sel_origin_type,
-                                    root_combo=inp_root_combo,
-                                    loan_lang=inp_loan_lang,
-                                    editor=current_user,
-                                    is_ai_word=is_ai_word,
-                                )
-                                if ok_d:
-                                    if inp_expl.strip():
-                                        File "/mount/src/ciriciring-no-iciatatao/app.py", line 3097
-                                          except Exception:
-                                         ^
-                                        try:
-                                            save_word_note(
-                                                clean_w,
-                                                inp_expl.strip(),
-                                                current_user,
-                                                tag=LOANWORD_TAG if sel_origin_type == "音譯" else None,
-                                            )
-                                        except Exception:
-                                            pass
-                                    st.session_state[edit_mode_key] = False
-                                    st.success(msg_d)
-                                    st.rerun()
-                                else:
-                                    st.error(msg_d)
-                        with col_c:
-                            if st.button("取消", key=f"btn_cancel_edit_{key_prefix}_{idx}"):
+col_s, col_c = st.columns(2)
+                    with col_s:
+                        if st.button("💾 儲存單字詳情", key=f"btn_save_detail_{key_prefix}_{idx}"):
+                            ok_d, msg_d = save_word_detail_record(
+                                key=clean_w,
+                                pipipangayan=inp_pipi,
+                                explanation=inp_expl,
+                                origin_type=sel_origin_type,
+                                root_combo=inp_root_combo,
+                                loan_lang=inp_loan_lang,
+                                editor=current_user,
+                                is_ai_word=is_ai_word,
+                            )
+                            if ok_d:
+                                if inp_expl.strip():
+                                    try:
+                                        save_word_note(
+                                            clean_w,
+                                            inp_expl.strip(),
+                                            current_user,
+                                            tag=LOANWORD_TAG if sel_origin_type == "音譯" else None,
+                                        )
+                                    except Exception:
+                                        pass
                                 st.session_state[edit_mode_key] = False
+                                st.success(msg_d)
                                 st.rerun()
-                                        except Exception:
-                                            pass
-                                    st.session_state[edit_mode_key] = False
-                                    st.success(msg_d)
-                                    st.rerun()
-                                else:
-                                    st.error(msg_d)
-                        with col_c:
-                            if st.button("取消", key=f"btn_cancel_edit_{key_prefix}_{idx}"):
-                                st.session_state[edit_mode_key] = False
-                                st.rerun()
+                            else:
+                                st.error(msg_d)
+                    with col_c:
+                        if st.button("取消", key=f"btn_cancel_edit_{key_prefix}_{idx}"):
+                            st.session_state[edit_mode_key] = False
+                            st.rerun()
 
                     st.divider()
                     st.markdown("**4. 例句（雙語）**")
