@@ -165,22 +165,34 @@ components.html(
     height=0,
 )
 
-st.markdown(
-    """
-    <style>
-    /* ========================================================= */
-    /* 1. 深淺色模式字體顏色設定                                   */
-    /* ========================================================= */
-    
-    /* 預設／淺色（白色）模式：字體顯示黑色 */
-    body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
-        color: #000000;
-    }
+st.markdown("""
+<style>
+/* 1. 預設與 Streamlit 原生主題（利用原生 CSS 變數，自動跟隨系統與 Streamlit 設定） */
+body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+    color: var(--text-color, #000000);
+}
 
-    /* 系統與深色（黑色）模式：字體顯示白色 */
-    @media (prefers-color-scheme: dark) {
-        body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
-            color: #FFFFFF;
+/* 2. 強制淺色（白色）模式：字體一律為黑色 (排除螢光標記按鈕) */
+@media (prefers-color-scheme: light) {
+    body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+        color: #000000 !important;
+    }
+}
+
+/* 3. 強制深色（暗黑）模式：字體一律為白色 (排除螢光標記按鈕) */
+@media (prefers-color-scheme: dark) {
+    body, .stApp, [data-testid="stAppViewContainer"], .stMarkdown, p, span, div, label {
+        color: #FFFFFF !important;
+    }
+}
+
+/* 4. 特殊保護：螢光黃/螢光紅底色的按鈕或標記，文字必須維持黑色，否則在亮色底上會看不清 */
+.highlight-yellow, .highlight-red, 
+button[kind="secondary"] {
+    color: #111827 !important;
+}
+</style>
+""", unsafe_allow_html=True)
         }
     }
 
