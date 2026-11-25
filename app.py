@@ -24,7 +24,7 @@ def dual_text(tao: str, zh: str, is_title: bool = False) -> str:
     return f"""
     <div style="margin-bottom: 8px;">
         <div style="font-size: {size_tao}; font-weight: bold; line-height: 1.3;">{tao}</div>
-        <div style="font-size: {size_zh}; opacity: 0.7; line-height: 1.2;">{zh}</div>
+        <div style="font-size: {size_zh}; opacity: 0.72; line-height: 1.2;">{zh}</div>
     </div>
     """
 
@@ -133,7 +133,22 @@ if "per_sentence_disabled_phrases" not in st.session_state:
 if "pending_session_votes" not in st.session_state:
     st.session_state.pending_session_votes = []
 
-# 自動關閉拼字檢查 + 片語滑鼠懸停同步黑底線 + 主題背景亮度同步
+# 預設設定為淺色模式，並精準偵測實際有效背景色
+st.markdown(
+    """
+    <script>
+        (function() {
+            const doc = window.parent ? window.parent.document : document;
+            if (!doc.documentElement.getAttribute("data-theme-mode")) {
+                const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+                doc.documentElement.setAttribute("data-theme-mode", prefersDark ? "dark" : "light");
+            }
+        })();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
 components.html(
     """
     <script>
@@ -167,20 +182,32 @@ components.html(
             });
         }
 
+        function getEffectiveBgColor(doc) {
+            const candidates = [
+                doc.querySelector('[data-testid="stAppViewContainer"]'),
+                doc.querySelector('.stApp'),
+                doc.body,
+                doc.documentElement
+            ];
+            for (const el of candidates) {
+                if (!el) continue;
+                const bg = parent.getComputedStyle(el).backgroundColor;
+                const m = bg && bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
+                if (m) {
+                    const alpha = m[4] === undefined ? 1 : parseFloat(m[4]);
+                    if (alpha > 0.05) {
+                        return [Number(m[1]), Number(m[2]), Number(m[3])];
+                    }
+                }
+            }
+            return [255, 255, 255];
+        }
+
         function syncThemeTextColor() {
             const doc = parent.document;
-            const container = doc.querySelector('[data-testid="stAppViewContainer"]') || doc.body;
-            if (!container) return;
-            const bgColor = parent.getComputedStyle(container).backgroundColor;
-            const match = bgColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-            let isDark = false;
-            if (match) {
-                const r = Number(match[1]);
-                const g = Number(match[2]);
-                const b = Number(match[3]);
-                const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-                isDark = luminance < 0.5;
-            }
+            const [r, g, b] = getEffectiveBgColor(doc);
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            const isDark = luminance < 0.5;
             doc.documentElement.setAttribute("data-theme-mode", isDark ? "dark" : "light");
         }
 
@@ -203,31 +230,33 @@ st.markdown(
     """
 <style>
     /* ========================================================= */
-    /* 1. 主題自適應字體顏色（支援系統主題與手動切換）            */
+    /* 1. 主題自適應字體顏色（預設淺色 #111827，深色 #FFFFFF）     */
     /* ========================================================= */
-    [data-theme-mode="light"] .stApp,
-    [data-theme-mode="light"] [data-testid="stAppViewContainer"],
-    [data-theme-mode="light"] [data-testid="stSidebar"],
-    [data-theme-mode="light"] [data-testid="stMarkdownContainer"],
-    [data-theme-mode="light"] [data-testid="stMarkdownContainer"] p,
-    [data-theme-mode="light"] [data-testid="stMarkdownContainer"] span,
-    [data-theme-mode="light"] [data-testid="stMarkdownContainer"] div,
-    [data-theme-mode="light"] [data-testid="stMarkdownContainer"] li,
-    [data-theme-mode="light"] label,
-    [data-theme-mode="light"] .stCaption {
-        color: #000000 !important;
+    html, html[data-theme-mode="light"],
+    html[data-theme-mode="light"] .stApp,
+    html[data-theme-mode="light"] [data-testid="stAppViewContainer"],
+    html[data-theme-mode="light"] [data-testid="stSidebar"],
+    html[data-theme-mode="light"] [data-testid="stMarkdownContainer"],
+    html[data-theme-mode="light"] [data-testid="stMarkdownContainer"] p,
+    html[data-theme-mode="light"] [data-testid="stMarkdownContainer"] span,
+    html[data-theme-mode="light"] [data-testid="stMarkdownContainer"] div,
+    html[data-theme-mode="light"] [data-testid="stMarkdownContainer"] li,
+    html[data-theme-mode="light"] label,
+    html[data-theme-mode="light"] .stCaption {
+        color: #111827 !important;
     }
 
-    [data-theme-mode="dark"] .stApp,
-    [data-theme-mode="dark"] [data-testid="stAppViewContainer"],
-    [data-theme-mode="dark"] [data-testid="stSidebar"],
-    [data-theme-mode="dark"] [data-testid="stMarkdownContainer"],
-    [data-theme-mode="dark"] [data-testid="stMarkdownContainer"] p,
-    [data-theme-mode="dark"] [data-testid="stMarkdownContainer"] span,
-    [data-theme-mode="dark"] [data-testid="stMarkdownContainer"] div,
-    [data-theme-mode="dark"] [data-testid="stMarkdownContainer"] li,
-    [data-theme-mode="dark"] label,
-    [data-theme-mode="dark"] .stCaption {
+    html[data-theme-mode="dark"],
+    html[data-theme-mode="dark"] .stApp,
+    html[data-theme-mode="dark"] [data-testid="stAppViewContainer"],
+    html[data-theme-mode="dark"] [data-testid="stSidebar"],
+    html[data-theme-mode="dark"] [data-testid="stMarkdownContainer"],
+    html[data-theme-mode="dark"] [data-testid="stMarkdownContainer"] p,
+    html[data-theme-mode="dark"] [data-testid="stMarkdownContainer"] span,
+    html[data-theme-mode="dark"] [data-testid="stMarkdownContainer"] div,
+    html[data-theme-mode="dark"] [data-testid="stMarkdownContainer"] li,
+    html[data-theme-mode="dark"] label,
+    html[data-theme-mode="dark"] .stCaption {
         color: #FFFFFF !important;
     }
 
@@ -321,12 +350,11 @@ st.markdown(
     """
     <div style='text-align: center; padding-top: 5px; padding-bottom: 15px;'>
         <h1 style='font-size: 42px; font-weight: bold; color: #3B82F6;'>ciriciring no iciatatao</h1>
-        <div style='font-size: 24px; opacity: 0.7; font-weight: 600;'>眾語</div>
+        <div style='font-size: 24px; opacity: 0.72; font-weight: 600;'>眾語</div>
     </div>
 """,
     unsafe_allow_html=True,
 )
-
 
 @st.cache_resource
 def init_supabase() -> Client:
