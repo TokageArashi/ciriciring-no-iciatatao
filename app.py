@@ -981,14 +981,15 @@ def _save_word_details_store(store: dict) -> None:
         _load_word_details_cached.clear()
 
 
-def get_first_use_info(word_key: str) -> tuple[str, str]:
+def get_first_use_info(word_key: str, is_ai_red_word: bool = False) -> tuple[str, str]:
     """
     查詢單字的「初次使用」來源與日期（不可編輯）：
-    - 若此字為 AI 產生且使用者直接採用，回傳 ("AI 生成", 日期)
+    - 若此字為 AI 產生（包含紅色標記的 AI 生成詞或使用者直接採納的 AI 生成詞），回傳 ("AI 生成", 日期)
     - 若為使用者輸入/提案，回傳 (使用者帳號, 日期)
     - 若來自語料庫，回傳 ("語料庫", 日期)
     """
     k = normalize_word(word_key)
+    today_str = datetime.date.today().isoformat()
     store = _load_word_details_cached()
     rec = store.get(k) or {}
     if rec.get("first_user") and rec.get("first_date"):
@@ -998,7 +999,7 @@ def get_first_use_info(word_key: str) -> tuple[str, str]:
     n_info = notes.get(k)
     if n_info:
         editor = n_info.get("editor") or "語料庫"
-        date_str = str(n_info.get("created_at") or "")[:10] or datetime.date.today().isoformat()
+        date_str = str(n_info.get("created_at") or "")[:10] or today_str
         if "AI生成" in editor or "AI" in editor:
             return "AI 生成", date_str
         return editor, date_str
@@ -1008,24 +1009,31 @@ def get_first_use_info(word_key: str) -> tuple[str, str]:
             toks = {normalize_word(t) for t in f"{item.get('tao', '')} {item.get('zh', '')}".split()}
             if k in toks:
                 provider = item.get("source", "").replace("公開社群句子 (提供者: ", "").replace(")", "").strip()
-                return provider or "社群使用者", datetime.date.today().isoformat()
+                return provider or "社群使用者", today_str
         else:
             toks = {normalize_word(t) for t in (item.get("tao") or "").split()}
             if k in toks:
                 return "語料庫", "更早"
 
-    return "語料庫", datetime.date.today().isoformat()
+    if is_ai_red_word:
+        return "AI 生成", today_str
+
+    return "語料庫", today_str
 
 
-def get_word_detail_record(key: str) -> dict:
+def get_word_detail_record(key: str, is_ai_red_word: bool = False) -> dict:
     k = (key or "").strip().lower()
     store = _load_word_details_cached()
     rec = store.get(k) or {}
-    first_u, first_d = get_first_use_info(k)
+    first_u, first_d = get_first_use_info(k, is_ai_red_word=is_ai_red_word)
+    default_origin = "新造詞" if is_ai_red_word else ""
+    raw_origin = (rec.get("origin_type") or "").strip()
+    if (first_u == "AI 生成" or is_ai_red_word) and raw_origin == "固有詞":
+        raw_origin = "新造詞"
     return {
         "pipipangayan": rec.get("pipipangayan", ""),
         "explanation": rec.get("explanation", ""),
-        "origin_type": rec.get("origin_type", "固有詞"),
+        "origin_type": raw_origin if raw_origin else default_origin,
         "root_combo": rec.get("root_combo", ""),
         "loan_lang": rec.get("loan_lang", ""),
         "variants_note": rec.get("variants_note", ""),
@@ -1047,20 +1055,24 @@ def save_word_detail_record(
     variants_note: str = "",
     first_user: str | None = None,
     first_date: str | None = None,
+    is_ai_word: bool = False,
 ) -> tuple[bool, str]:
     k = (key or "").strip().lower()
     if not k:
         return False, "詞彙鍵值無效。"
-    if origin_type not in ETYMOLOGY_OPTIONS:
-        return False, "語源僅可選擇：固有詞、新造詞、音譯。"
+    store = _load_word_details_store()
+    cur = store.get(k, {})
+    fu, fd = get_first_use_info(k, is_ai_red_word=is_ai_word)
+    effective_first_user = cur.get("first_user") or first_user or fu
+    allowed_options = AI_ETYMOLOGY_OPTIONS if (is_ai_word or effective_first_user == "AI 生成") else ETYMOLOGY_OPTIONS
+
+    if origin_type not in allowed_options:
+        return False, f"語源僅可選擇：{'、'.join(allowed_options)}。"
     if origin_type == "新造詞" and not (root_combo or "").strip():
         return False, "選擇「新造詞」時，詞根組合為必填欄位。"
     if origin_type == "音譯" and not (loan_lang or "").strip():
         return False, "選擇「音譯」時，何種語言為必填欄位。"
 
-    store = _load_word_details_store()
-    cur = store.get(k, {})
-    fu, fd = get_first_use_info(k)
     store[k] = {
         "pipipangayan": (pipipangayan or "").strip(),
         "explanation": (explanation or "").strip(),
@@ -1070,7 +1082,7 @@ def save_word_detail_record(
         "variants_note": (variants_note or "").strip(),
         "editor": editor,
         "updated_at": datetime.datetime.now().isoformat(),
-        "first_user": cur.get("first_user") or first_user or fu,
+        "first_user": effective_first_user,
         "first_date": cur.get("first_date") or first_date or fd,
     }
     _save_word_details_store(store)
