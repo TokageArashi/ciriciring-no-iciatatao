@@ -577,7 +577,7 @@ def record_sentence_reaction(
 
     if reaction == "like":
         return True, "👍 已記錄您的按讚！", None
-    return True, "👎 已記錄您的倒讚與原因（原因僅供後台保存，前台不公開）。", None
+    return True, "👎 已記錄您的倒讚與原因。", None
 
 
 def _region_list(value):
@@ -639,6 +639,82 @@ def evaluate_sentence_policy(
 
     return True, weight, None
 
+def render_sentence_reaction_bar(
+    sent_key: str,
+    fb_id: int | str | None,
+    current_user_info: dict | None,
+    all_reactions: list[dict],
+) -> None:
+    """渲染句子按讚與倒讚操作列（倒讚原因僅於後台保存，前台不公開原因）。"""
+    recs = [
+        r for r in (all_reactions or [])
+        if r.get("sentence_key") == sent_key
+        or (
+            fb_id is not None
+            and str(r.get("feedback_id") or "") == str(fb_id)
+            and r.get("sentence_key", "").startswith(sent_key.split("_")[0])
+        )
+    ]
+    like_cnt = sum(1 for r in recs if r.get("reaction") == "like")
+    dislike_cnt = sum(1 for r in recs if r.get("reaction") == "dislike")
+
+    current_user = current_user_info.get("username") if current_user_info else None
+    my_rx = next((r for r in recs if current_user and r.get("user_id") == current_user), None)
+
+    c_like, c_dislike, c_status = st.columns([1.2, 1.5, 4.3])
+
+    with c_like:
+        like_label = f"👍 讚 ({like_cnt})" + (" ✓" if (my_rx and my_rx.get("reaction") == "like") else "")
+        if st.button(like_label, key=f"btn_like_{sent_key}_{fb_id}"):
+            if not current_user_info:
+                st.warning("請先登入後再按讚。")
+            else:
+                ok, msg, _ = record_sentence_reaction(
+                    fb_id=fb_id,
+                    sent_key=sent_key,
+                    user_info=current_user_info,
+                    reaction="like",
+                    reasons=[],
+                )
+                if ok:
+                    st.toast(msg, icon="👍")
+                    st.rerun()
+                else:
+                    st.warning(msg)
+
+    with c_dislike:
+        dislike_label = f"👎 倒讚 ({dislike_cnt})" + (" ✓" if (my_rx and my_rx.get("reaction") == "dislike") else "")
+        with st.popover(dislike_label, key=f"pop_dislike_{sent_key}_{fb_id}"):
+            if not current_user_info:
+                st.warning("請先登入後再提出倒讚。")
+            else:
+                st.markdown("**請選擇倒讚原因（原因僅供後台保存，前台不公開）：**")
+                selected_reasons = st.multiselect(
+                    "倒讚原因",
+                    options=DISLIKE_REASONS,
+                    key=f"ms_dislike_reason_{sent_key}_{fb_id}",
+                    label_visibility="collapsed",
+                )
+                if st.button("送出倒讚", key=f"btn_submit_dislike_{sent_key}_{fb_id}"):
+                    if not selected_reasons:
+                        st.warning("請至少勾選一項原因。")
+                    else:
+                        ok, msg, _ = record_sentence_reaction(
+                            fb_id=fb_id,
+                            sent_key=sent_key,
+                            user_info=current_user_info,
+                            reaction="dislike",
+                            reasons=selected_reasons,
+                        )
+                        if ok:
+                            st.toast(msg, icon="👎")
+                            st.rerun()
+                        else:
+                            st.warning(msg)
+
+    with c_status:
+        if my_rx and my_rx.get("reaction") == "dislike":
+            st.caption("已記錄您的倒讚（已隱藏此句於您的演算法推薦；原因僅保存於後台）。")
 
 @st.cache_data(ttl=300)
 def _load_all_raw_corpus_cached():
