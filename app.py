@@ -3076,6 +3076,9 @@ def render_interactive_sentence(
                                 )
                                 if ok_d:
                                     if inp_expl.strip():
+                                        File "/mount/src/ciriciring-no-iciatatao/app.py", line 3097
+                                          except Exception:
+                                         ^
                                         try:
                                             save_word_note(
                                                 clean_w,
