@@ -2973,6 +2973,13 @@ def render_interactive_sentence(
                     st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
                     st.markdown(f"- **用例數（含所有異體字總和）**: `{total_variant_usage}` 次（語料庫 {corpus_sum} ＋ 社群例句 {comm_sum}）")
 
+is_red_ai_word = (level == "red") and bool(is_ai_generated)
+                    detail_rec = get_word_detail_record(clean_w, is_ai_red_word=is_red_ai_word)
+                    is_ai_word = is_red_ai_word or (detail_rec.get("first_user") == "AI 生成")
+
+                    st.markdown(f"### 🔠 單字詳情: **{p_info['phrase'] if p_info else w}**")
+                    st.markdown(f"- **用例數（含所有異體字總和）**: `{total_variant_usage}` 次（語料庫 {corpus_sum} ＋ 社群例句 {comm_sum}）")
+
                     # 初次使用條目（不可編輯）
                     st.markdown(f"- **初次使用**：`{detail_rec['first_user']}`（使用日期：{detail_rec['first_date']}）＊不可編輯")
 
@@ -2982,7 +2989,13 @@ def render_interactive_sentence(
                             st.success(f"已取消本句中的片語「{p_info['phrase']}」（其他句子不受影響）。")
                             st.rerun()
 
-                    cur_origin_type = detail_rec["origin_type"] if detail_rec["origin_type"] in ETYMOLOGY_OPTIONS else "固有詞"
+                    opt_list = AI_ETYMOLOGY_OPTIONS if is_ai_word else ETYMOLOGY_OPTIONS
+                    raw_origin = (detail_rec["origin_type"] or "").strip()
+                    if is_ai_word:
+                        cur_origin_type = raw_origin if raw_origin in AI_ETYMOLOGY_OPTIONS else "新造詞"
+                    else:
+                        cur_origin_type = raw_origin if raw_origin in ETYMOLOGY_OPTIONS else ""
+
                     edit_mode_key = f"word_detail_edit_mode_{key_prefix}_{idx}"
                     is_editing = bool(st.session_state.get(edit_mode_key, False))
 
@@ -2996,7 +3009,7 @@ def render_interactive_sentence(
                         origin_extra = f"（語言：{detail_rec['loan_lang']}）"
                     elif cur_origin_type == "固有詞" and detail_rec["root_combo"]:
                         origin_extra = f"（詞根組合：{detail_rec['root_combo']}）"
-                    st.markdown(f"- **語源**：{cur_origin_type}{origin_extra}")
+                    st.markdown(f"- **語源**：{cur_origin_type or '（尚未設定）'}{origin_extra}")
 
                     if current_user and not is_editing:
                         if st.button("✏️ 編輯單字詳情", key=f"btn_enter_edit_{key_prefix}_{idx}"):
@@ -3021,7 +3034,6 @@ def render_interactive_sentence(
                         )
 
                         st.markdown("**3. 語源**")
-                        opt_list = AI_ETYMOLOGY_OPTIONS if level == "red" else ETYMOLOGY_OPTIONS
                         default_idx = opt_list.index(cur_origin_type) if cur_origin_type in opt_list else 0
                         sel_origin_type = st.radio(
                             "語源類型",
@@ -3066,6 +3078,7 @@ def render_interactive_sentence(
                                     root_combo=inp_root_combo,
                                     loan_lang=inp_loan_lang,
                                     editor=current_user,
+                                    is_ai_word=is_ai_word,
                                 )
                                 if ok_d:
                                     if inp_expl.strip():
@@ -3076,6 +3089,17 @@ def render_interactive_sentence(
                                                 current_user,
                                                 tag=LOANWORD_TAG if sel_origin_type == "音譯" else None,
                                             )
+                                        except Exception:
+                                            pass
+                                    st.session_state[edit_mode_key] = False
+                                    st.success(msg_d)
+                                    st.rerun()
+                                else:
+                                    st.error(msg_d)
+                        with col_c:
+                            if st.button("取消", key=f"btn_cancel_edit_{key_prefix}_{idx}"):
+                                st.session_state[edit_mode_key] = False
+                                st.rerun()
                                         except Exception:
                                             pass
                                     st.session_state[edit_mode_key] = False
